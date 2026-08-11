@@ -1,0 +1,5 @@
+entrypoint = "app/__main__.py"
+run = "python -m app"
+
+[deployment]
+run = ["sh", "-c", "python -m app"]

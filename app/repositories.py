@@ -1,0 +1,574 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
+
+from .metadata import ParsedMetadata
+from .models import (
+    AccessMode,
+    AuditEvent,
+    CatalogState,
+    Category,
+    CategoryMode,
+    ContentKind,
+    ContentRecord,
+    FileRecord,
+    IndexFailure,
+    MediaType,
+    RecordKind,
+    UserProfile,
+    UsersState,
+    UserStatus,
+    WatchlistEntry,
+    WatchStatus,
+)
+from .storage import StateStore
+from .utils import make_id, normalize_title, slugify, utcnow_iso
+
+
+def _source_key(chat_id: int, message_id: int) -> str:
+    return f"{chat_id}:{message_id}"
+
+
+def _append_audit(
+    state: CatalogState,
+    action: str,
+    details: str,
+    actor_id: int | None = None,
+) -> None:
+    state.audit_events.append(
+        AuditEvent(
+            id=make_id("audit"),
+            action=action,
+            actor_id=actor_id,
+            details=details,
+        )
+    )
+    state.audit_events = state.audit_events[-200:]
+
+
+class CatalogRepository:
+    def __init__(self, store: StateStore[CatalogState]) -> None:
+        self.store = store
+
+    def snapshot(self) -> CatalogState:
+        return self.store.snapshot()
+
+    def get_category(self, category_id: str) -> Category | None:
+        item = self.store.state.categories.get(category_id)
+        return item.model_copy(deep=True) if item else None
+
+    def category_for_channel(self, channel_id: int) -> Category | None:
+        for category in self.store.state.categories.values():
+            if (
+                channel_id == category.active_channel_id
+                or channel_id in category.legacy_channel_ids
+            ):
+                return category.model_copy(deep=True)
+        return None
+
+    def list_categories(self, include_disabled: bool = False) -> list[Category]:
+        values = self.store.state.categories.values()
+        result = [item.model_copy(deep=True) for item in values if include_disabled or item.enabled]
+        return sorted(result, key=lambda item: item.name.casefold())
+
+    async def add_category(
+        self,
+        name: str,
+        channel_id: int,
+        channel_title: str | None,
+        mode: CategoryMode = CategoryMode.MIXED,
+        actor_id: int | None = None,
+    ) -> Category:
+        name = " ".join(name.split()).strip()
+        if not name:
+            raise ValueError("Category name cannot be empty")
+
+        def mutate(state: CatalogState) -> Category:
+            for existing in state.categories.values():
+                if existing.name.casefold() == name.casefold():
+                    raise ValueError("A category with this name already exists")
+                if (
+                    channel_id == existing.active_channel_id
+                    or channel_id in existing.legacy_channel_ids
+                ):
+                    raise ValueError("This channel is already assigned to a category")
+            base_slug = slugify(name)
+            used = {item.slug for item in state.categories.values()}
+            slug = base_slug
+            suffix = 2
+            while slug in used:
+                slug = f"{base_slug}-{suffix}"
+                suffix += 1
+            category = Category(
+                id=make_id("cat"),
+                name=name,
+                slug=slug,
+                active_channel_id=channel_id,
+                channel_title=channel_title,
+                mode=mode,
+            )
+            state.categories[category.id] = category
+            _append_audit(state, "category.add", f"Added {name} ({channel_id})", actor_id)
+            return category.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def rename_category(
+        self, category_id: str, new_name: str, actor_id: int | None = None
+    ) -> Category:
+        new_name = " ".join(new_name.split()).strip()
+        if not new_name:
+            raise ValueError("Category name cannot be empty")
+
+        def mutate(state: CatalogState) -> Category:
+            category = state.categories.get(category_id)
+            if category is None:
+                raise ValueError("Category not found")
+            if any(
+                item.id != category_id and item.name.casefold() == new_name.casefold()
+                for item in state.categories.values()
+            ):
+                raise ValueError("A category with this name already exists")
+            old = category.name
+            category.name = new_name
+            category.updated_at = utcnow_iso()
+            _append_audit(state, "category.rename", f"Renamed {old} to {new_name}", actor_id)
+            return category.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def set_category_mode(
+        self, category_id: str, mode: CategoryMode, actor_id: int | None = None
+    ) -> Category:
+        def mutate(state: CatalogState) -> Category:
+            category = state.categories.get(category_id)
+            if category is None:
+                raise ValueError("Category not found")
+            category.mode = mode
+            category.updated_at = utcnow_iso()
+            _append_audit(
+                state, "category.mode", f"Set {category.name} mode to {mode.value}", actor_id
+            )
+            return category.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def set_category_enabled(
+        self, category_id: str, enabled: bool, actor_id: int | None = None
+    ) -> Category:
+        def mutate(state: CatalogState) -> Category:
+            category = state.categories.get(category_id)
+            if category is None:
+                raise ValueError("Category not found")
+            category.enabled = enabled
+            category.updated_at = utcnow_iso()
+            _append_audit(
+                state,
+                "category.enable" if enabled else "category.disable",
+                f"{'Enabled' if enabled else 'Disabled'} {category.name}",
+                actor_id,
+            )
+            return category.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def change_category_channel(
+        self,
+        category_id: str,
+        channel_id: int,
+        channel_title: str | None,
+        actor_id: int | None = None,
+    ) -> Category:
+        def mutate(state: CatalogState) -> Category:
+            category = state.categories.get(category_id)
+            if category is None:
+                raise ValueError("Category not found")
+            for item in state.categories.values():
+                if item.id == category_id:
+                    continue
+                if channel_id == item.active_channel_id or channel_id in item.legacy_channel_ids:
+                    raise ValueError("This channel is already assigned to another category")
+            old = category.active_channel_id
+            if old != channel_id and old not in category.legacy_channel_ids:
+                category.legacy_channel_ids.append(old)
+            if channel_id in category.legacy_channel_ids:
+                category.legacy_channel_ids.remove(channel_id)
+            category.active_channel_id = channel_id
+            category.channel_title = channel_title
+            category.updated_at = utcnow_iso()
+            _append_audit(
+                state,
+                "category.channel",
+                f"Changed {category.name} channel from {old} to {channel_id}",
+                actor_id,
+            )
+            return category.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def record_failure(
+        self,
+        source_chat_id: int,
+        source_message_id: int,
+        category_id: str,
+        reason: str,
+    ) -> None:
+        key = _source_key(source_chat_id, source_message_id)
+
+        def mutate(state: CatalogState) -> None:
+            previous = state.failures.get(key)
+            state.failures[key] = IndexFailure(
+                source_chat_id=source_chat_id,
+                source_message_id=source_message_id,
+                category_id=category_id,
+                reason=reason,
+                created_at=previous.created_at if previous else utcnow_iso(),
+                updated_at=utcnow_iso(),
+            )
+            _append_audit(state, "index.failure", f"{key}: {reason}")
+
+        await self.store.mutate(mutate)
+
+    @staticmethod
+    def _choose_content(
+        state: CatalogState,
+        category_id: str,
+        metadata: ParsedMetadata,
+    ) -> ContentRecord | None:
+        normalized = normalize_title(metadata.title)
+        exact_key = f"{category_id}|{normalized}|{metadata.year or '?'}"
+        exact_id = state.content_lookup.get(exact_key)
+        exact = state.contents.get(exact_id) if exact_id else None
+        if exact is not None:
+            return exact
+        candidates = [
+            item
+            for item in state.contents.values()
+            if item.category_id == category_id and item.normalized_title == normalized
+        ]
+        if metadata.year is not None:
+            unknown = next((item for item in candidates if item.year is None), None)
+            if unknown:
+                return unknown
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+        unknown = next((item for item in candidates if item.year is None), None)
+        return unknown
+
+    async def upsert_file(
+        self,
+        *,
+        category_id: str,
+        source_chat_id: int,
+        source_message_id: int,
+        telegram_file_id: str,
+        telegram_file_unique_id: str,
+        media_type: MediaType,
+        metadata: ParsedMetadata,
+    ) -> tuple[FileRecord, ContentRecord, bool]:
+        source = _source_key(source_chat_id, source_message_id)
+
+        def mutate(state: CatalogState) -> tuple[FileRecord, ContentRecord, bool]:
+            category = state.categories.get(category_id)
+            if category is None:
+                raise ValueError("Category not found")
+            old_file_id = state.source_lookup.get(source)
+            old_file = state.files.get(old_file_id) if old_file_id else None
+            is_new = old_file is None
+
+            content = self._choose_content(state, category_id, metadata)
+            reused_old_content = False
+            if content is None and old_file is not None:
+                old_content = state.contents.get(old_file.content_id)
+                if old_content is not None and old_content.file_ids == [old_file.id]:
+                    # Correcting the only file's title/year should preserve content deep links and
+                    # watchlist relationships rather than create a ghost content record.
+                    content = old_content
+                    reused_old_content = True
+            content_kind = (
+                ContentKind.SERIES
+                if metadata.season is not None or metadata.episode is not None
+                else ContentKind.MOVIE
+            )
+            if content is None:
+                normalized = normalize_title(metadata.title)
+                group_key = f"{category_id}|{normalized}|{metadata.year or '?'}"
+                content = ContentRecord(
+                    id=make_id("c"),
+                    group_key=group_key,
+                    category_id=category_id,
+                    title=metadata.title,
+                    normalized_title=normalized,
+                    year=metadata.year,
+                    kind=content_kind,
+                )
+                state.contents[content.id] = content
+                state.content_lookup[group_key] = content.id
+            else:
+                old_key = content.group_key
+                content.title = metadata.title
+                content.normalized_title = normalize_title(metadata.title)
+                if metadata.year is not None and (reused_old_content or content.year is None):
+                    content.year = metadata.year
+                content.group_key = (
+                    f"{category_id}|{content.normalized_title}|{content.year or '?'}"
+                )
+                if old_key != content.group_key:
+                    state.content_lookup.pop(old_key, None)
+                state.content_lookup[content.group_key] = content.id
+                if content_kind == ContentKind.SERIES:
+                    content.kind = ContentKind.SERIES
+                content.updated_at = utcnow_iso()
+
+            if metadata.episode is not None:
+                record_kind = RecordKind.EPISODE
+            elif metadata.season is not None:
+                record_kind = RecordKind.SEASON_PACK_PART
+            else:
+                record_kind = RecordKind.MOVIE
+
+            file_id = old_file.id if old_file else make_id("f")
+            created_at = old_file.created_at if old_file else utcnow_iso()
+            record = FileRecord(
+                id=file_id,
+                content_id=content.id,
+                category_id=category_id,
+                source_chat_id=source_chat_id,
+                source_message_id=source_message_id,
+                telegram_file_id=telegram_file_id,
+                telegram_file_unique_id=telegram_file_unique_id,
+                media_type=media_type,
+                record_kind=record_kind,
+                title=metadata.title,
+                year=metadata.year or content.year,
+                languages=metadata.languages,
+                quality=metadata.quality,
+                season=metadata.season,
+                episode=metadata.episode,
+                pack_part=metadata.pack_part
+                or (1 if record_kind == RecordKind.SEASON_PACK_PART else None),
+                available=True,
+                created_at=created_at,
+                updated_at=utcnow_iso(),
+            )
+
+            if old_file and old_file.content_id != content.id:
+                old_content = state.contents.get(old_file.content_id)
+                if old_content and file_id in old_content.file_ids:
+                    old_content.file_ids.remove(file_id)
+                    old_content.updated_at = utcnow_iso()
+            state.files[file_id] = record
+            state.source_lookup[source] = file_id
+            if file_id not in content.file_ids:
+                content.file_ids.append(file_id)
+            content.updated_at = utcnow_iso()
+            state.failures.pop(source, None)
+            _append_audit(
+                state,
+                "index.add" if is_new else "index.update",
+                f"{metadata.title} from {source}",
+            )
+            return (
+                record.model_copy(deep=True),
+                content.model_copy(deep=True),
+                is_new,
+            )
+
+        return await self.store.mutate(mutate)
+
+    async def mark_file_available(self, file_id: str, available: bool) -> FileRecord:
+        def mutate(state: CatalogState) -> FileRecord:
+            record = state.files.get(file_id)
+            if record is None:
+                raise ValueError("File not found")
+            record.available = available
+            record.updated_at = utcnow_iso()
+            _append_audit(
+                state,
+                "file.available" if available else "file.unavailable",
+                f"Set {file_id} available={available}",
+            )
+            return record.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def add_audit(self, action: str, details: str, actor_id: int | None) -> None:
+        def mutate(state: CatalogState) -> None:
+            _append_audit(state, action, details, actor_id)
+
+        await self.store.mutate(mutate)
+
+    def get_content(self, content_id: str) -> ContentRecord | None:
+        item = self.store.state.contents.get(content_id)
+        return item.model_copy(deep=True) if item else None
+
+    def get_file(self, file_id: str) -> FileRecord | None:
+        item = self.store.state.files.get(file_id)
+        return item.model_copy(deep=True) if item else None
+
+    def files_for_content(self, content_id: str, available_only: bool = True) -> list[FileRecord]:
+        content = self.store.state.contents.get(content_id)
+        if content is None:
+            return []
+        result = []
+        for file_id in content.file_ids:
+            record = self.store.state.files.get(file_id)
+            if record and (record.available or not available_only):
+                result.append(record.model_copy(deep=True))
+        return result
+
+    def recent_audit(self, limit: int = 20) -> list[AuditEvent]:
+        return [item.model_copy(deep=True) for item in self.store.state.audit_events[-limit:]][::-1]
+
+
+class UserRepository:
+    def __init__(self, store: StateStore[UsersState]) -> None:
+        self.store = store
+
+    def snapshot(self) -> UsersState:
+        return self.store.snapshot()
+
+    def get_user(self, user_id: int) -> UserProfile | None:
+        item = self.store.state.users.get(str(user_id))
+        return item.model_copy(deep=True) if item else None
+
+    def list_users(self, statuses: Iterable[UserStatus] | None = None) -> list[UserProfile]:
+        allowed = set(statuses) if statuses else None
+        users = [
+            item.model_copy(deep=True)
+            for item in self.store.state.users.values()
+            if allowed is None or item.status in allowed
+        ]
+        return sorted(users, key=lambda item: item.created_at, reverse=True)
+
+    async def ensure_user(
+        self,
+        *,
+        user_id: int,
+        first_name: str,
+        last_name: str | None,
+        username: str | None,
+        language_code: str | None,
+        is_owner: bool = False,
+    ) -> tuple[UserProfile, bool]:
+        existing = self.store.state.users.get(str(user_id))
+        now = datetime.now(UTC)
+        should_write = existing is None
+        if existing:
+            metadata_changed = (
+                existing.first_name != first_name
+                or existing.last_name != last_name
+                or existing.username != username
+                or existing.language_code != language_code
+            )
+            try:
+                last_seen = datetime.fromisoformat(existing.last_seen_at)
+            except ValueError:
+                last_seen = now - timedelta(days=1)
+            should_write = metadata_changed or now - last_seen >= timedelta(hours=6)
+            if is_owner and existing.status != UserStatus.ACTIVE:
+                should_write = True
+            if (
+                self.store.state.access_mode == AccessMode.PUBLIC
+                and existing.status == UserStatus.PENDING
+            ):
+                should_write = True
+        if not should_write and existing:
+            return existing.model_copy(deep=True), False
+
+        def mutate(state: UsersState) -> tuple[UserProfile, bool]:
+            key = str(user_id)
+            user = state.users.get(key)
+            created = user is None
+            if user is None:
+                status = (
+                    UserStatus.ACTIVE
+                    if is_owner or state.access_mode == AccessMode.PUBLIC
+                    else UserStatus.PENDING
+                )
+                user = UserProfile(
+                    telegram_user_id=user_id,
+                    first_name=first_name,
+                    last_name=last_name,
+                    username=username,
+                    language_code=language_code,
+                    status=status,
+                )
+                state.users[key] = user
+            else:
+                user.first_name = first_name
+                user.last_name = last_name
+                user.username = username
+                user.language_code = language_code
+                if is_owner or (
+                    state.access_mode == AccessMode.PUBLIC and user.status == UserStatus.PENDING
+                ):
+                    user.status = UserStatus.ACTIVE
+                user.updated_at = utcnow_iso()
+                user.last_seen_at = utcnow_iso()
+            return user.model_copy(deep=True), created
+
+        return await self.store.mutate(mutate)
+
+    async def set_access_mode(self, mode: AccessMode) -> AccessMode:
+        def mutate(state: UsersState) -> AccessMode:
+            state.access_mode = mode
+            return mode
+
+        return await self.store.mutate(mutate)
+
+    async def set_user_status(self, user_id: int, status: UserStatus) -> UserProfile:
+        def mutate(state: UsersState) -> UserProfile:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            user.status = status
+            user.updated_at = utcnow_iso()
+            return user.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def set_watch_status(
+        self,
+        *,
+        user_id: int,
+        content_id: str,
+        title: str,
+        year: int | None,
+        category_id: str,
+        category_name: str,
+        status: WatchStatus,
+    ) -> WatchlistEntry:
+        def mutate(state: UsersState) -> WatchlistEntry:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            existing = user.watchlist.get(content_id)
+            entry = WatchlistEntry(
+                content_id=content_id,
+                title=title,
+                year=year,
+                category_id=category_id,
+                category_name=category_name,
+                status=status,
+                added_at=existing.added_at if existing else utcnow_iso(),
+                updated_at=utcnow_iso(),
+            )
+            user.watchlist[content_id] = entry
+            user.updated_at = utcnow_iso()
+            return entry.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def remove_watchlist(self, user_id: int, content_id: str) -> bool:
+        def mutate(state: UsersState) -> bool:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            removed = user.watchlist.pop(content_id, None) is not None
+            user.updated_at = utcnow_iso()
+            return removed
+
+        return await self.store.mutate(mutate)

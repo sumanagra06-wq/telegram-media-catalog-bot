@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+import logging
+import sys
+
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
+
+from .commands import register_commands
+from .config import Config, ConfigError
+from .handlers import admin, channel, common, search, watchlist
+from .models import CatalogState, UsersState
+from .repositories import CatalogRepository, UserRepository
+from .services import CatalogQueryService, SearchSessionStore
+from .storage import StateStore, StorageError, TelegramSnapshotBackend
+
+LOGGER = logging.getLogger(__name__)
+
+
+async def _validate_database_channel(bot: Bot, channel_id: int, name: str) -> None:
+    chat = await bot.get_chat(channel_id)
+    if chat.type != ChatType.CHANNEL:
+        raise RuntimeError(f"{name} database ID does not refer to a channel")
+    if chat.username:
+        raise RuntimeError(f"{name} database channel must be private")
+    member = await bot.get_chat_member(channel_id, (await bot.get_me()).id)
+    if member.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
+        raise RuntimeError(f"Bot must be an administrator in the {name} database channel")
+    if member.status == ChatMemberStatus.ADMINISTRATOR:
+        if not getattr(member, "can_post_messages", False):
+            raise RuntimeError(f"Bot needs Post Messages permission in the {name} database")
+        if not getattr(member, "can_edit_messages", False):
+            raise RuntimeError(
+                f"Bot needs Edit Messages permission in the {name} database to maintain its manifest"
+            )
+
+
+def create_application(config: Config) -> web.Application:
+    bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dispatcher = Dispatcher(storage=MemoryStorage())
+
+    catalog_backend = TelegramSnapshotBackend(bot, config.file_database_channel_id, "catalog")
+    users_backend = TelegramSnapshotBackend(bot, config.user_database_channel_id, "users")
+    catalog_store = StateStore(catalog_backend, CatalogState, CatalogState)
+    users_store = StateStore(users_backend, UsersState, UsersState)
+    catalog = CatalogRepository(catalog_store)
+    users = UserRepository(users_store)
+    query = CatalogQueryService(catalog)
+    sessions = SearchSessionStore()
+
+    # Stateful admin handlers must run before the plain-text search handler.
+    dispatcher.include_router(admin.router)
+    dispatcher.include_router(common.router)
+    dispatcher.include_router(watchlist.router)
+    dispatcher.include_router(search.router)
+    dispatcher.include_router(channel.router)
+
+    dispatcher["config"] = config
+    dispatcher["catalog"] = catalog
+    dispatcher["users"] = users
+    dispatcher["query"] = query
+    dispatcher["sessions"] = sessions
+
+    async def on_startup(bot: Bot) -> None:
+        await _validate_database_channel(bot, config.file_database_channel_id, "file/catalog")
+        await _validate_database_channel(bot, config.user_database_channel_id, "user")
+        await catalog_store.initialize()
+        await users_store.initialize()
+        await register_commands(bot, config)
+        await bot.set_webhook(
+            url=config.webhook_url,
+            secret_token=config.webhook_secret_token,
+            allowed_updates=dispatcher.resolve_used_update_types(),
+            drop_pending_updates=False,
+        )
+        identity = await bot.get_me()
+        LOGGER.info(
+            "Started @%s with catalog r%s and users r%s",
+            identity.username,
+            catalog.snapshot().revision,
+            users.snapshot().revision,
+        )
+
+    dispatcher.startup.register(on_startup)
+
+    app = web.Application()
+
+    async def health(_: web.Request) -> web.Response:
+        try:
+            data = {
+                "status": "ok",
+                "catalog_revision": catalog.snapshot().revision,
+                "users_revision": users.snapshot().revision,
+            }
+            return web.json_response(data)
+        except StorageError:
+            return web.json_response({"status": "starting"}, status=503)
+
+    async def root(_: web.Request) -> web.Response:
+        return web.json_response({"service": "telegram-media-catalog-bot"})
+
+    app.router.add_get("/", root)
+    app.router.add_get("/health", health)
+    SimpleRequestHandler(
+        dispatcher=dispatcher,
+        bot=bot,
+        handle_in_background=False,
+        secret_token=config.webhook_secret_token,
+    ).register(app, path=config.webhook_path)
+    setup_application(app, dispatcher, bot=bot)
+    return app
+
+
+def run() -> None:
+    try:
+        config = Config.from_env()
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    logging.basicConfig(
+        level=getattr(logging, config.log_level, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    web.run_app(create_application(config), host=config.host, port=config.port)
