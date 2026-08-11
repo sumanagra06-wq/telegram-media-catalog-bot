@@ -176,6 +176,33 @@ def _title_from_primary(primary: str) -> str:
     return title
 
 
+def canonicalize_title(value: str) -> str:
+    """Return the stable catalog title from a title or filename-style value.
+
+    Labeled captions often put the entire filename after ``Title:`` or ``Name:``.
+    They must pass through the same metadata-boundary cleanup as unlabeled filenames;
+    otherwise S01E01 and S01E02 become different catalog titles. The fallback preserves
+    legitimate title-only years such as ``1984`` when a boundary occurs at position zero.
+    """
+
+    title = _title_from_primary(value)
+    if title:
+        return title
+
+    # A legitimate title can itself be a year (for example ``1899`` or ``1923``).
+    # If episode/quality metadata follows it, ignore the year boundary at position zero
+    # and cut at the next unambiguous metadata boundary instead.
+    working = _normalize_working_line(value)
+    later_boundaries = []
+    for pattern in (_SEASON_EPISODE_RE, _SEASON_RE, _QUALITY_RE, _TECHNICAL_BOUNDARY_RE):
+        match = pattern.search(working)
+        if match and match.start() > 0:
+            later_boundaries.append(match.start())
+    if later_boundaries:
+        return _clean_title(working[: min(later_boundaries)])
+    return _clean_title(value)
+
+
 def parse_metadata(caption: str | None, filename: str | None = None) -> ParsedMetadata:
     lines = _metadata_lines(caption, filename)
     if not lines:
@@ -186,7 +213,7 @@ def parse_metadata(caption: str | None, filename: str | None = None) -> ParsedMe
 
     explicit_title = _labeled_value(combined, _LABELS["title"])
     if explicit_title:
-        title = _clean_title(explicit_title)
+        title = canonicalize_title(explicit_title)
     else:
         first_working = _normalize_working_line(lines[0])
         first_has_metadata = any(
@@ -240,6 +267,13 @@ def parse_metadata(caption: str | None, filename: str | None = None) -> ParsedMe
     pack_part = None
     if pack_match:
         pack_part = int(pack_match.group("part") or pack_match.group("part2"))
+
+    # Defense in depth for any caption shape that extracted episode metadata but reached
+    # the title through a different branch. Repository writes enforce this invariant too.
+    if season is not None or episode is not None:
+        title = canonicalize_title(title)
+    if not title:
+        raise MetadataParseError("Could not determine the canonical title")
 
     return ParsedMetadata(
         title=title,

@@ -14,9 +14,10 @@ from .commands import register_commands
 from .config import Config, ConfigError
 from .handlers import admin, channel, common, search, watchlist
 from .models import CatalogState, UsersState
-from .repositories import CatalogRepository, UserRepository
+from .repositories import CatalogRepairResult, CatalogRepository, UserRepository
 from .services import CatalogQueryService, SearchSessionStore
 from .storage import StateStore, StorageError, TelegramSnapshotBackend
+from .utils import safe_html
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +38,49 @@ async def _validate_database_channel(bot: Bot, channel_id: int, name: str) -> No
             raise RuntimeError(
                 f"Bot needs Edit Messages permission in the {name} database to maintain its manifest"
             )
+
+
+async def _write_repair_cards(
+    bot: Bot,
+    config: Config,
+    catalog: CatalogRepository,
+    repair: CatalogRepairResult,
+) -> None:
+    """Append corrected human-readable cards after the authoritative repair commit."""
+
+    for file_id in repair.repaired_file_ids:
+        record = catalog.get_file(file_id)
+        if record is None:
+            continue
+        category = catalog.get_category(record.category_id)
+        languages = ", ".join(record.languages) if record.languages else "Unknown"
+        details = [
+            "🔧 FILE INDEX REPAIRED",
+            "",
+            f"File ID: <code>{record.id}</code>",
+            f"Content ID: <code>{record.content_id}</code>",
+            f"Title: {safe_html(record.title)}",
+            f"Category: {safe_html(category.name if category else record.category_id)}",
+            f"Year: {record.year or 'Unknown'}",
+            f"Language: {safe_html(languages)}",
+            f"Quality: {safe_html(record.quality or 'Unknown')}",
+        ]
+        if record.season is not None:
+            details.append(f"Season: {record.season}")
+        if record.episode is not None:
+            details.append(f"Episode: {record.episode}")
+        if record.pack_part is not None:
+            details.append(f"Season pack part: {record.pack_part}")
+        details.append(f"Source message: <code>{record.source_message_id}</code>")
+        try:
+            await bot.send_message(
+                config.file_database_channel_id,
+                "\n".join(details),
+                disable_notification=True,
+            )
+        except Exception:
+            # The Telegram snapshot is already committed; a display-only card cannot roll it back.
+            LOGGER.warning("Could not write corrected audit card for %s", file_id, exc_info=True)
 
 
 def create_application(config: Config) -> web.Application:
@@ -70,6 +114,14 @@ def create_application(config: Config) -> web.Application:
         await _validate_database_channel(bot, config.user_database_channel_id, "user")
         await catalog_store.initialize()
         await users_store.initialize()
+        repair = await catalog.repair_episodic_grouping()
+        if repair.changed:
+            LOGGER.warning(
+                "Repaired episodic grouping: %s files canonicalized, %s duplicate titles merged",
+                repair.updated_files,
+                repair.merged_contents,
+            )
+            await _write_repair_cards(bot, config, catalog, repair)
         await register_commands(bot, config)
         await bot.set_webhook(
             url=config.webhook_url,

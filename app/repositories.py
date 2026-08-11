@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from .metadata import ParsedMetadata
+from .metadata import ParsedMetadata, canonicalize_title
 from .models import (
     AccessMode,
     AuditEvent,
@@ -24,6 +26,19 @@ from .models import (
 )
 from .storage import StateStore
 from .utils import make_id, normalize_title, slugify, utcnow_iso
+
+
+@dataclass(frozen=True)
+class CatalogRepairResult:
+    updated_files: int = 0
+    updated_contents: int = 0
+    merged_contents: int = 0
+    content_id_remap: dict[str, str] = field(default_factory=dict)
+    repaired_file_ids: tuple[str, ...] = ()
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.updated_files or self.updated_contents or self.merged_contents)
 
 
 def _source_key(chat_id: int, message_id: int) -> str:
@@ -231,6 +246,158 @@ class CatalogRepository:
         await self.store.mutate(mutate)
 
     @staticmethod
+    def _repair_episodic_state(state: CatalogState) -> CatalogRepairResult:
+        """Canonicalize and merge episodic records without touching Telegram media.
+
+        This repairs snapshots produced when a filename-style value after ``Title:`` or
+        ``Name:`` was stored verbatim. Physical file records and source message references
+        remain unchanged; only catalog metadata and content associations are rewritten.
+        """
+
+        groups: dict[str, list[tuple[FileRecord, str]]] = defaultdict(list)
+        for record in state.files.values():
+            if record.season is None and record.episode is None:
+                continue
+            canonical = canonicalize_title(record.title)
+            if not canonical:
+                continue
+            content = state.contents.get(record.content_id)
+            year = record.year if record.year is not None else (content.year if content else None)
+            key = f"{record.category_id}|{normalize_title(canonical)}|{year or '?'}"
+            groups[key].append((record, canonical))
+
+        updated_file_ids: set[str] = set()
+        updated_content_ids: set[str] = set()
+        involved_content_ids: set[str] = set()
+        remap_targets: dict[str, set[str]] = defaultdict(set)
+
+        for group_key, entries in sorted(groups.items()):
+            entries.sort(
+                key=lambda item: (item[0].created_at, item[0].source_message_id, item[0].id)
+            )
+            canonical_title = entries[0][1]
+            normalized = normalize_title(canonical_title)
+            year = next((record.year for record, _ in entries if record.year is not None), None)
+            candidate_ids = {record.content_id for record, _ in entries}
+            involved_content_ids.update(candidate_ids)
+            candidates = [
+                state.contents[content_id]
+                for content_id in candidate_ids
+                if content_id in state.contents
+            ]
+            if not candidates:
+                continue
+            if year is None:
+                year = next(
+                    (content.year for content in candidates if content.year is not None),
+                    None,
+                )
+            exact = [
+                content
+                for content in candidates
+                if content.group_key == group_key
+                or (
+                    content.normalized_title == normalized
+                    and content.year == year
+                    and content.category_id == entries[0][0].category_id
+                )
+            ]
+            primary = min(
+                exact or candidates,
+                key=lambda content: (content.created_at, content.id),
+            )
+            for record, _ in entries:
+                old_content_id = record.content_id
+                if record.title != canonical_title:
+                    record.title = canonical_title
+                    record.updated_at = utcnow_iso()
+                    updated_file_ids.add(record.id)
+                if old_content_id != primary.id:
+                    record.content_id = primary.id
+                    record.updated_at = utcnow_iso()
+                    updated_file_ids.add(record.id)
+                    remap_targets[old_content_id].add(primary.id)
+
+            desired = (
+                primary.title != canonical_title
+                or primary.normalized_title != normalized
+                or primary.group_key != group_key
+                or primary.category_id != entries[0][0].category_id
+                or primary.year != year
+                or primary.kind != ContentKind.SERIES
+            )
+            if desired:
+                primary.title = canonical_title
+                primary.normalized_title = normalized
+                primary.group_key = group_key
+                primary.category_id = entries[0][0].category_id
+                primary.year = year
+                primary.kind = ContentKind.SERIES
+                primary.updated_at = utcnow_iso()
+                updated_content_ids.add(primary.id)
+
+        # Rebuild associations from authoritative file records after every reassignment.
+        old_file_ids = {content.id: list(content.file_ids) for content in state.contents.values()}
+        for content in state.contents.values():
+            content.file_ids = []
+        for record in sorted(state.files.values(), key=lambda item: (item.created_at, item.id)):
+            content = state.contents.get(record.content_id)
+            if content is not None:
+                content.file_ids.append(record.id)
+        for content in state.contents.values():
+            if content.file_ids != old_file_ids.get(content.id, []):
+                content.updated_at = utcnow_iso()
+                updated_content_ids.add(content.id)
+
+        obsolete_ids = {
+            content_id
+            for content_id in involved_content_ids
+            if content_id in state.contents and not state.contents[content_id].file_ids
+        }
+        content_id_remap: dict[str, str] = {}
+        for content_id in obsolete_ids:
+            targets = remap_targets.get(content_id, set())
+            if len(targets) == 1:
+                content_id_remap[content_id] = next(iter(targets))
+            state.contents.pop(content_id, None)
+            updated_content_ids.discard(content_id)
+
+        # Drop all stale episode-specific keys and rebuild the authoritative lookup.
+        rebuilt_lookup: dict[str, str] = {}
+        for content in sorted(state.contents.values(), key=lambda item: (item.created_at, item.id)):
+            rebuilt_lookup.setdefault(content.group_key, content.id)
+        lookup_changed = rebuilt_lookup != state.content_lookup
+        state.content_lookup = rebuilt_lookup
+
+        result = CatalogRepairResult(
+            updated_files=len(updated_file_ids),
+            updated_contents=len(updated_content_ids)
+            + int(lookup_changed and not updated_content_ids),
+            merged_contents=len(obsolete_ids),
+            content_id_remap=content_id_remap,
+            repaired_file_ids=tuple(sorted(updated_file_ids)),
+        )
+        if result.changed:
+            _append_audit(
+                state,
+                "catalog.repair.episodic",
+                f"Canonicalized {result.updated_files} files and merged "
+                f"{result.merged_contents} duplicate titles",
+            )
+        return result
+
+    async def repair_episodic_grouping(self) -> CatalogRepairResult:
+        preview = self.store.state.model_copy(deep=True)
+        preview_result = self._repair_episodic_state(preview)
+        if not preview_result.changed:
+            return preview_result
+
+        def mutate(state: CatalogState) -> CatalogRepairResult:
+            return self._repair_episodic_state(state)
+
+        return await self.store.mutate(mutate)
+
+    @staticmethod
     def _choose_content(
         state: CatalogState,
         category_id: str,
@@ -268,6 +435,12 @@ class CatalogRepository:
         media_type: MediaType,
         metadata: ParsedMetadata,
     ) -> tuple[FileRecord, ContentRecord, bool]:
+        # Enforce one stable series identity at the persistence boundary even if a future
+        # caption-parser branch accidentally leaves SxxExx or technical suffixes in the title.
+        if metadata.season is not None or metadata.episode is not None:
+            canonical_title = canonicalize_title(metadata.title)
+            if canonical_title and canonical_title != metadata.title:
+                metadata = metadata.model_copy(update={"title": canonical_title})
         source = _source_key(source_chat_id, source_message_id)
 
         def mutate(state: CatalogState) -> tuple[FileRecord, ContentRecord, bool]:
