@@ -18,6 +18,38 @@ def test_maamla_legal_hai_samples(episode: int) -> None:
     assert parsed.year is None
 
 
+@pytest.mark.parametrize("episode", range(1, 7))
+@pytest.mark.parametrize("label", ["", "Name: ", "Title: ", "Series - "])
+def test_operation_safed_sagar_separate_episode_caption_pattern(episode: int, label: str) -> None:
+    filename = f"Operation Safed Sagar The Highest Air Force Mission S01E{episode:02d} 1 mkv"
+    caption = (
+        f"{label}{filename}\n\n"
+        "⚠️ ❌👉This file automatically❗delete after 1 minute❗so please forward "
+        "in another chat👈❌"
+    )
+    parsed = parse_metadata(caption, filename)
+    assert parsed.title == "Operation Safed Sagar The Highest Air Force Mission"
+    assert parsed.season == 1
+    assert parsed.episode == episode
+    assert parsed.year is None
+    assert parsed.languages == []
+    assert parsed.quality is None
+
+
+def test_title_that_is_a_year_is_not_erased_by_canonicalization() -> None:
+    parsed = parse_metadata("Title: 1984")
+    assert parsed.title == "1984"
+    assert parsed.year == 1984
+
+
+def test_year_named_series_still_removes_episode_suffix() -> None:
+    parsed = parse_metadata("Title: 1923 S01E01 1080p English mkv")
+    assert parsed.title == "1923"
+    assert parsed.year == 1923
+    assert parsed.season == 1
+    assert parsed.episode == 1
+
+
 def test_lost_hyphenated_season_episode() -> None:
     parsed = parse_metadata("📁 LOST S02-E19 720p x265 Esubs mkv")
     assert parsed.title == "LOST"

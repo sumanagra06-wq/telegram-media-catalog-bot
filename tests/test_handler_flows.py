@@ -3,9 +3,10 @@ from types import SimpleNamespace
 from app.config import Config
 from app.handlers.channel import index_source_message
 from app.handlers.search import content_callback, episode_callback, plain_title_search
+from app.main import _write_repair_cards
 from app.metadata import parse_metadata
-from app.models import CatalogState, MediaType, UsersState
-from app.repositories import CatalogRepository, UserRepository
+from app.models import CatalogState, CategoryMode, MediaType, UsersState
+from app.repositories import CatalogRepairResult, CatalogRepository, UserRepository
 from app.services import CatalogQueryService, SearchSessionStore
 from app.storage import MemorySnapshotBackend, StateStore
 
@@ -147,3 +148,56 @@ async def test_channel_post_indexing_uses_allowlisted_metadata_only():
     assert record.season == 3
     assert record.episode == 1
     assert "forward" not in record.model_dump_json().casefold()
+
+
+async def test_six_separate_labeled_episode_messages_share_one_content_record():
+    catalog, _ = await _repositories()
+    await catalog.add_category("Series", -10010, "Series", CategoryMode.EPISODIC)
+    bot = FakeBot()
+    warning = (
+        "⚠️ ❌👉This file automatically❗delete after 1 minute❗so please forward "
+        "in another chat👈❌"
+    )
+
+    for episode in range(1, 7):
+        filename = f"Operation Safed Sagar The Highest Air Force Mission S01E{episode:02d} 1 mkv"
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=-10010, title="Series"),
+            message_id=episode + 2,
+            caption=f"Name: {filename}\n\n{warning}",
+            video=SimpleNamespace(
+                file_id=f"video-{episode}",
+                file_unique_id=f"video-unique-{episode}",
+                file_name=filename,
+            ),
+            document=None,
+        )
+        assert await index_source_message(message, bot, _config(), catalog) is True
+
+    state = catalog.snapshot()
+    assert len(state.contents) == 1
+    assert len(state.files) == 6
+    content = next(iter(state.contents.values()))
+    assert content.title == "Operation Safed Sagar The Highest Air Force Mission"
+    assert content.file_ids == list(state.files)
+    assert {record.content_id for record in state.files.values()} == {content.id}
+    assert {(record.season, record.episode) for record in state.files.values()} == {
+        (1, episode) for episode in range(1, 7)
+    }
+    audit_content_lines = {
+        next(line for line in text.splitlines() if line.startswith("Content ID:"))
+        for _, text, _ in bot.sent_messages
+    }
+    assert audit_content_lines == {f"Content ID: <code>{content.id}</code>"}
+
+    repair = CatalogRepairResult(
+        updated_files=6,
+        repaired_file_ids=tuple(state.files),
+    )
+    await _write_repair_cards(bot, _config(), catalog, repair)
+    repair_cards = [text for _, text, _ in bot.sent_messages if "FILE INDEX REPAIRED" in text]
+    assert len(repair_cards) == 6
+    assert {
+        next(line for line in text.splitlines() if line.startswith("Content ID:"))
+        for text in repair_cards
+    } == {f"Content ID: <code>{content.id}</code>"}

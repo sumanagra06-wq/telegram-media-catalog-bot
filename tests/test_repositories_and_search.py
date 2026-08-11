@@ -5,6 +5,8 @@ from app.models import (
     AccessMode,
     CatalogState,
     CategoryMode,
+    ContentKind,
+    ContentRecord,
     MediaType,
     UsersState,
     UserStatus,
@@ -13,6 +15,7 @@ from app.models import (
 from app.repositories import CatalogRepository, UserRepository
 from app.services import CatalogQueryService
 from app.storage import MemorySnapshotBackend, StateStore, StorageError
+from app.utils import normalize_title
 
 
 @pytest.fixture
@@ -63,6 +66,87 @@ async def test_dynamic_category_and_series_grouping(catalog_pair):
     assert query.seasons(content.id) == [2]
     assert query.episodes(content.id, 2) == [1, 2]
     assert len(query.episode_variants(content.id, 2, 1)) == 1
+
+
+async def test_repair_merges_existing_episode_titles_without_reupload(catalog_pair):
+    catalog, backend = catalog_pair
+    category = await catalog.add_category(
+        "Series", -100100, "Series Storage", CategoryMode.EPISODIC, 1
+    )
+    for episode in range(1, 7):
+        await _add_file(
+            catalog,
+            category.id,
+            episode + 2,
+            f"Operation Safed Sagar The Highest Air Force Mission S01E{episode:02d} 1 mkv",
+        )
+
+    # Recreate the exact bad persisted shape observed in production: six physical files,
+    # six content IDs, and filename-style titles that still include the episode token.
+    state = catalog.store.state
+    records = sorted(state.files.values(), key=lambda item: item.source_message_id)
+    state.contents = {}
+    state.content_lookup = {}
+    immutable_media_fields = {
+        record.id: (
+            record.source_chat_id,
+            record.source_message_id,
+            record.telegram_file_id,
+            record.telegram_file_unique_id,
+        )
+        for record in records
+    }
+    for episode, record in enumerate(records, start=1):
+        raw_title = f"Operation Safed Sagar The Highest Air Force Mission S01E{episode:02d} 1 mkv"
+        content_id = f"c_old_{episode}"
+        normalized = normalize_title(raw_title)
+        group_key = f"{category.id}|{normalized}|?"
+        record.content_id = content_id
+        record.title = raw_title
+        state.contents[content_id] = ContentRecord(
+            id=content_id,
+            group_key=group_key,
+            category_id=category.id,
+            title=raw_title,
+            normalized_title=normalized,
+            kind=ContentKind.SERIES,
+            file_ids=[record.id],
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+        state.content_lookup[group_key] = content_id
+
+    revision_before = state.revision
+    commits_before = len(backend.commits)
+    result = await catalog.repair_episodic_grouping()
+    repaired = catalog.snapshot()
+
+    assert result.changed is True
+    assert result.updated_files == 6
+    assert result.merged_contents == 5
+    assert len(result.content_id_remap) == 5
+    assert set(result.repaired_file_ids) == set(repaired.files)
+    assert repaired.revision == revision_before + 1
+    assert len(repaired.contents) == 1
+    assert len(repaired.files) == 6
+    content = next(iter(repaired.contents.values()))
+    assert content.title == "Operation Safed Sagar The Highest Air Force Mission"
+    assert {record.content_id for record in repaired.files.values()} == {content.id}
+    assert {record.title for record in repaired.files.values()} == {content.title}
+    assert {
+        record.id: (
+            record.source_chat_id,
+            record.source_message_id,
+            record.telegram_file_id,
+            record.telegram_file_unique_id,
+        )
+        for record in repaired.files.values()
+    } == immutable_media_fields
+
+    second = await catalog.repair_episodic_grouping()
+    assert second.changed is False
+    assert catalog.snapshot().revision == revision_before + 1
+    assert len(backend.commits) == commits_before + 1
 
 
 async def test_pack_parts_and_search_ranking(catalog_pair):
