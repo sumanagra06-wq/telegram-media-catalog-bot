@@ -13,6 +13,7 @@ A private-channel media catalog for movies and series. Telegram stores both the 
   - common language names and abbreviations
   - split season archives such as `.zip.001`, `.002`, `.003`
   - leading uploader mentions, emojis, technical codec text, and forwarding warnings
+  - complete filename-style values after labels such as `Name:` or `Title:`
 - Only title, year, language, quality, season, and episode/pack part are indexed from captions
 - Exact, prefix, word, substring, and typo-tolerant title ranking
 - Four search results per page
@@ -25,6 +26,7 @@ A private-channel media catalog for movies and series. Telegram stores both the 
 - Protected delivery through `protect_content=True`
 - Versioned, checksummed gzip snapshots in two private Telegram database channels
 - Current and previous snapshot fallback through a pinned manifest
+- Idempotent startup repair for legacy episode-specific title records; media is not re-uploaded
 - Owner backups, database status, audit, user controls, unavailable-file management, and indexing-failure reporting
 - Synchronous webhook processing so a successful HTTP response follows handler/database completion
 
@@ -151,6 +153,7 @@ Supported series patterns include:
 Maamla Legal Hai S02E01 1080p Hindi WEB DL 5 1 ESub x264 Mov mkv
 📁 LOST S02-E19 720p x265 Esubs mkv
 @UHDPrime Game of Thrones S03 E01 BluRay 720p Hindi 2 0 English mkv
+Name: Operation Safed Sagar The Highest Air Force Mission S01E01 1 mkv
 Game.Of.Thrones.S01.720p.10Bit.BluRay.Hindi-English.HEVC.x265.zip.zip.001
 ```
 

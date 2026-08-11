@@ -28,14 +28,15 @@ This report records checks performed before packaging. It is not a claim that li
 6. Improved multiline caption parsing and scanning across caption plus filename.
 7. Preserved content IDs/watchlist relationships when correcting the only file's title or year.
 8. Added a versioned state base model, pinned production dependency versions, and clean Replit/Python runtime metadata.
+9. Fixed filename-style values after `Title:`/`Name:` so episode tokens never become part of the catalog identity; added persistence-boundary canonicalization and an idempotent startup migration that merges affected titles without re-uploading Telegram media.
 
 ## Automated results at package time
 
 - Ruff lint: passed
 - Ruff formatting check: passed
 - Python compileall: passed
-- Pytest with warnings treated as errors: passed (34 tests)
-- Test coverage: 54% overall; parser 95%, snapshot storage 83%, services 79%, with live Telegram/Railway branches necessarily unexecuted without credentials
+- Pytest with warnings treated as errors: passed (62 tests)
+- Test coverage: 56% overall; parser 98%, snapshot storage 83%, repositories 69%, and services 79%, with credential-dependent Telegram/Railway branches necessarily unexecuted
 - Bandit: passed; the required Railway `0.0.0.0` bind is explicitly documented/suppressed
 - pip-audit: passed, no known vulnerabilities in production requirements
 - Mypy: core models, parser, storage, repositories, services, UI, commands and filters passed
@@ -63,6 +64,9 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Telegram callback-data size limits
 - Plain-text user search → content screen → episode protected-delivery handler flow
 - Automatic channel-post indexing handler flow with allowlisted metadata only
+- Six separate `Operation Safed Sagar ... S01E01`–`S01E06` messages, including filename-style labels and forwarding warnings, grouping as one title with six files
+- Idempotent repair of a persisted six-title/six-file snapshot into one title/six files while preserving Telegram file IDs and source message references
+- Corrected File Database repair cards using one shared content ID
 - Security-sensitive environment-variable validation
 
 ## Honest remaining limits
