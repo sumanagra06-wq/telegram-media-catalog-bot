@@ -18,6 +18,7 @@ from .models import (
     IndexFailure,
     MediaType,
     RecordKind,
+    RemovedSourceRecord,
     UserProfile,
     UsersState,
     UserStatus,
@@ -39,6 +40,13 @@ class CatalogRepairResult:
     @property
     def changed(self) -> bool:
         return bool(self.updated_files or self.updated_contents or self.merged_contents)
+
+
+@dataclass(frozen=True)
+class ContentRemovalResult:
+    content: ContentRecord
+    files: tuple[FileRecord, ...]
+    sources: tuple[RemovedSourceRecord, ...]
 
 
 def _source_key(chat_id: int, message_id: int) -> str:
@@ -68,6 +76,27 @@ class CatalogRepository:
 
     def snapshot(self) -> CatalogState:
         return self.store.snapshot()
+
+    async def migrate_schema(self) -> bool:
+        if self.store.state.schema_version >= 2:
+            return False
+
+        def mutate(state: CatalogState) -> bool:
+            state.schema_version = 2
+            _append_audit(state, "catalog.schema", "Migrated catalog schema to version 2")
+            return True
+
+        return await self.store.mutate(mutate)
+
+    def is_source_removed(self, chat_id: int, message_id: int) -> bool:
+        return _source_key(chat_id, message_id) in self.store.state.removed_sources
+
+    def pending_removed_sources(self) -> list[RemovedSourceRecord]:
+        return [
+            item.model_copy(deep=True)
+            for item in self.store.state.removed_sources.values()
+            if not item.telegram_deleted
+        ]
 
     def get_category(self, category_id: str) -> Category | None:
         item = self.store.state.categories.get(category_id)
@@ -444,6 +473,8 @@ class CatalogRepository:
         source = _source_key(source_chat_id, source_message_id)
 
         def mutate(state: CatalogState) -> tuple[FileRecord, ContentRecord, bool]:
+            if source in state.removed_sources:
+                raise ValueError("This source message was permanently removed by the owner")
             category = state.categories.get(category_id)
             if category is None:
                 raise ValueError("Category not found")
@@ -551,6 +582,87 @@ class CatalogRepository:
 
         return await self.store.mutate(mutate)
 
+    async def remove_content(
+        self,
+        content_id: str,
+        actor_id: int,
+    ) -> ContentRemovalResult:
+        """Remove one catalog title and tombstone every source before Telegram deletion.
+
+        The catalog commit is the safety boundary: delivery and automatic re-indexing are
+        blocked even if deleting a source-channel message later fails.
+        """
+
+        def mutate(state: CatalogState) -> ContentRemovalResult:
+            content = state.contents.get(content_id)
+            if content is None:
+                raise ValueError("Title not found")
+            files = sorted(
+                (record for record in state.files.values() if record.content_id == content.id),
+                key=lambda record: (record.source_chat_id, record.source_message_id, record.id),
+            )
+            sources: list[RemovedSourceRecord] = []
+            for record in files:
+                source = _source_key(record.source_chat_id, record.source_message_id)
+                tombstone = RemovedSourceRecord(
+                    source_chat_id=record.source_chat_id,
+                    source_message_id=record.source_message_id,
+                    content_title=content.title,
+                )
+                state.removed_sources[source] = tombstone
+                sources.append(tombstone)
+                state.files.pop(record.id, None)
+                state.source_lookup.pop(source, None)
+                state.failures.pop(source, None)
+
+            state.contents.pop(content.id, None)
+            for key, value in list(state.content_lookup.items()):
+                if value == content.id:
+                    state.content_lookup.pop(key, None)
+            _append_audit(
+                state,
+                "content.remove",
+                f"Removed {content.title} with {len(files)} files",
+                actor_id,
+            )
+            return ContentRemovalResult(
+                content=content.model_copy(deep=True),
+                files=tuple(record.model_copy(deep=True) for record in files),
+                sources=tuple(item.model_copy(deep=True) for item in sources),
+            )
+
+        return await self.store.mutate(mutate)
+
+    async def mark_removed_sources_deleted(self, sources: Iterable[tuple[int, int]]) -> int:
+        keys = {_source_key(chat_id, message_id) for chat_id, message_id in sources}
+        pending = [
+            key
+            for key in keys
+            if key in self.store.state.removed_sources
+            and not self.store.state.removed_sources[key].telegram_deleted
+        ]
+        if not pending:
+            return 0
+
+        def mutate(state: CatalogState) -> int:
+            changed = 0
+            for key in pending:
+                item = state.removed_sources.get(key)
+                if item is None or item.telegram_deleted:
+                    continue
+                item.telegram_deleted = True
+                item.updated_at = utcnow_iso()
+                changed += 1
+            if changed:
+                _append_audit(
+                    state,
+                    "content.sources_deleted",
+                    f"Confirmed deletion of {changed} source messages",
+                )
+            return changed
+
+        return await self.store.mutate(mutate)
+
     async def mark_file_available(self, file_id: str, available: bool) -> FileRecord:
         def mutate(state: CatalogState) -> FileRecord:
             record = state.files.get(file_id)
@@ -602,6 +714,31 @@ class UserRepository:
 
     def snapshot(self) -> UsersState:
         return self.store.snapshot()
+
+    async def migrate_schema(self) -> bool:
+        needs_migration = self.store.state.schema_version < 2 or any(
+            not entry.id or key != entry.id
+            for user in self.store.state.users.values()
+            for key, entry in user.watchlist.items()
+        )
+        if not needs_migration:
+            return False
+
+        def mutate(state: UsersState) -> bool:
+            for user in state.users.values():
+                migrated: dict[str, WatchlistEntry] = {}
+                for entry in user.watchlist.values():
+                    entry_id = entry.id or make_id("w")
+                    while entry_id in migrated:
+                        entry_id = make_id("w")
+                    entry.id = entry_id
+                    migrated[entry_id] = entry
+                user.watchlist = migrated
+                user.updated_at = utcnow_iso()
+            state.schema_version = 2
+            return True
+
+        return await self.store.mutate(mutate)
 
     def get_user(self, user_id: int) -> UserProfile | None:
         item = self.store.state.users.get(str(user_id))
@@ -703,45 +840,115 @@ class UserRepository:
 
         return await self.store.mutate(mutate)
 
-    async def set_watch_status(
+    async def upsert_watchlist_entry(
         self,
         *,
         user_id: int,
-        content_id: str,
         title: str,
-        year: int | None,
         category_id: str,
         category_name: str,
         status: WatchStatus,
-    ) -> WatchlistEntry:
-        def mutate(state: UsersState) -> WatchlistEntry:
+        content_id: str | None = None,
+        year: int | None = None,
+    ) -> tuple[WatchlistEntry, bool]:
+        title = " ".join(title.split()).strip()
+        if not title:
+            raise ValueError("Title cannot be empty")
+        if len(title) > 160:
+            raise ValueError("Title must be 160 characters or fewer")
+
+        def mutate(state: UsersState) -> tuple[WatchlistEntry, bool]:
             user = state.users.get(str(user_id))
             if user is None:
                 raise ValueError("User not found")
-            existing = user.watchlist.get(content_id)
+            normalized = normalize_title(title)
+            existing = next(
+                (
+                    entry
+                    for entry in user.watchlist.values()
+                    if entry.category_id == category_id
+                    and (
+                        (content_id is not None and entry.content_id == content_id)
+                        or normalize_title(entry.title) == normalized
+                    )
+                ),
+                None,
+            )
+            created = existing is None
+            entry_id = existing.id if existing else make_id("w")
             entry = WatchlistEntry(
-                content_id=content_id,
+                id=entry_id,
+                content_id=content_id
+                if content_id is not None
+                else (existing.content_id if existing else None),
                 title=title,
-                year=year,
+                year=year if year is not None else (existing.year if existing else None),
                 category_id=category_id,
                 category_name=category_name,
                 status=status,
                 added_at=existing.added_at if existing else utcnow_iso(),
                 updated_at=utcnow_iso(),
             )
-            user.watchlist[content_id] = entry
+            user.watchlist[entry_id] = entry
+            user.updated_at = utcnow_iso()
+            return entry.model_copy(deep=True), created
+
+        return await self.store.mutate(mutate)
+
+    def get_watchlist_entry(self, user_id: int, entry_id: str) -> WatchlistEntry | None:
+        user = self.store.state.users.get(str(user_id))
+        entry = user.watchlist.get(entry_id) if user else None
+        return entry.model_copy(deep=True) if entry else None
+
+    async def update_watchlist_status(
+        self,
+        user_id: int,
+        entry_id: str,
+        status: WatchStatus,
+    ) -> WatchlistEntry:
+        def mutate(state: UsersState) -> WatchlistEntry:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            entry = user.watchlist.get(entry_id)
+            if entry is None:
+                raise ValueError("Watchlist entry not found")
+            entry.status = status
+            entry.updated_at = utcnow_iso()
             user.updated_at = utcnow_iso()
             return entry.model_copy(deep=True)
 
         return await self.store.mutate(mutate)
 
-    async def remove_watchlist(self, user_id: int, content_id: str) -> bool:
+    async def remove_watchlist_entry(self, user_id: int, entry_id: str) -> bool:
         def mutate(state: UsersState) -> bool:
             user = state.users.get(str(user_id))
             if user is None:
                 raise ValueError("User not found")
-            removed = user.watchlist.pop(content_id, None) is not None
-            user.updated_at = utcnow_iso()
+            removed = user.watchlist.pop(entry_id, None) is not None
+            if removed:
+                user.updated_at = utcnow_iso()
             return removed
 
         return await self.store.mutate(mutate)
+
+    async def set_watchlist_visibility(self, user_id: int, is_public: bool) -> UserProfile:
+        def mutate(state: UsersState) -> UserProfile:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            user.watchlist_public = is_public
+            user.updated_at = utcnow_iso()
+            return user.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    def public_watchlist_users(self, exclude_user_id: int | None = None) -> list[UserProfile]:
+        values = [
+            user.model_copy(deep=True)
+            for user in self.store.state.users.values()
+            if user.status == UserStatus.ACTIVE
+            and user.watchlist_public
+            and user.telegram_user_id != exclude_user_id
+        ]
+        return sorted(values, key=lambda user: (user.first_name.casefold(), user.telegram_user_id))

@@ -6,7 +6,9 @@ This report records checks performed before packaging. It is not a claim that li
 
 - Telegram snapshot transaction order, manifest recovery, checksums and previous-revision fallback
 - Dynamic categories, legacy channels and idempotent source-message updates
-- User access states and exact watchlist statuses
+- User access states, exact watchlist statuses, manual/catalog entry flows, and read-only public sharing
+- User-scoped watchlist mutation authorization and private-visibility enforcement
+- Owner-only catalog removal, tombstones, Telegram deletion retry, and manual-cleanup confirmation
 - Search ranking, pagination and callback-size constraints
 - Series episodes, variants and split season packs
 - Protected delivery and Telegram file-ID fallback
@@ -29,14 +31,16 @@ This report records checks performed before packaging. It is not a claim that li
 7. Preserved content IDs/watchlist relationships when correcting the only file's title or year.
 8. Added a versioned state base model, pinned production dependency versions, and clean Replit/Python runtime metadata.
 9. Fixed filename-style values after `Title:`/`Name:` so episode tokens never become part of the catalog identity; added persistence-boundary canonicalization and an idempotent startup migration that merges affected titles without re-uploading Telegram media.
+10. Replaced direct catalog-screen watchlist controls with a dedicated panel supporting dynamic categories, manual and indexed titles, explicit status selection, public-by-default read-only community lists, and a private visibility toggle. Added versioned migration for legacy entries.
+11. Added owner-only, double-confirmed catalog-title removal. The catalog commit blocks delivery first, source tombstones prevent re-indexing, recent Telegram posts are deleted in batches, failures remain retryable, and old posts can be manually confirmed after Telegram's deletion window expires.
 
 ## Automated results at package time
 
 - Ruff lint: passed
 - Ruff formatting check: passed
 - Python compileall: passed
-- Pytest with warnings treated as errors: passed (62 tests)
-- Test coverage: 56% overall; parser 98%, snapshot storage 83%, repositories 69%, and services 79%, with credential-dependent Telegram/Railway branches necessarily unexecuted
+- Pytest with warnings treated as errors: passed (70 tests)
+- Test coverage: 60% overall; parser 98%, snapshot storage 84%, repositories 70%, services 79%, Watchlist handlers 49%, and UI 61%, with credential-dependent Telegram/Railway branches necessarily unexecuted
 - Bandit: passed; the required Railway `0.0.0.0` bind is explicitly documented/suppressed
 - pip-audit: passed, no known vulnerabilities in production requirements
 - Mypy: core models, parser, storage, repositories, services, UI, commands and filters passed
@@ -67,6 +71,12 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Six separate `Operation Safed Sagar ... S01E01`–`S01E06` messages, including filename-style labels and forwarding warnings, grouping as one title with six files
 - Idempotent repair of a persisted six-title/six-file snapshot into one title/six files while preserving Telegram file IDs and source message references
 - Corrected File Database repair cards using one shared content ID
+- Manual-title and existing-catalog Watchlist panel flows with dynamic category selection
+- Public read-only community lists, private visibility enforcement, and bounded callback data
+- Legacy watchlist schema migration and idempotent rekeying
+- Owner title removal deleting all catalog files, preserving unrelated watchlists, and blocking old-source re-indexing
+- Failed Telegram source deletion remaining safely tombstoned, retry succeeding, and manual cleanup confirmation
+- Failed catalog-removal snapshot commit rolling back without partial in-memory deletion
 - Security-sensitive environment-variable validation
 
 ## Honest remaining limits
@@ -74,6 +84,7 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - A real end-to-end Telegram and Railway smoke test still requires the owner's bot token, owner ID, private channel IDs and Railway domain. Those secrets were not available during this audit.
 - Telegram-only persistence is appropriate for the stated 40–50-user scale, not high-write public scale.
 - The standard Bot API cannot scan arbitrary old channel history; `/index` is required for missed old posts.
+- Telegram normally limits bot message deletion to messages sent within 48 hours. Older source posts require manual owner deletion; catalog tombstones still block delivery and re-indexing immediately.
 - Telegram protected content blocks normal official-client forwarding/saving but is not absolute DRM against modified clients or external capture.
 - The normal Bot API snapshot download ceiling still applies; the app rejects compressed snapshots near that limit instead of silently corrupting recovery.
 - Exactly one Railway replica must remain configured because there is no external distributed lock.

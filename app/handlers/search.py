@@ -116,12 +116,10 @@ async def content_callback(
     if category is None:
         await callback.answer("The title category is unavailable.", show_alert=True)
         return
-    entry = profile.watchlist.get(content.id)
     text, markup = content_screen(
         content=content,
         category=category,
         query=query,
-        watch_status=entry.status if entry else None,
         back_token=token,
         back_page=int(page_text),
     )

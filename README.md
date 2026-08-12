@@ -20,7 +20,11 @@ A private-channel media catalog for movies and series. Telegram stores both the 
 - Series navigation: title → season → episode → variant → protected file
 - Season packs: title → season → Complete Season Pack → Part 1/2/3
 - Movie navigation: title → language/quality variant → protected file
-- Watchlist statuses are exactly: To Watch, On Hold, Completed
+- Dedicated Watchlist panel with manual-title and existing-catalog add flows
+- Dynamic category selection and exactly three statuses: To Watch, On Hold, Completed
+- Public community watchlists by default, with per-user private visibility and read-only viewing
+- Owner-only, double-confirmed catalog-title removal that deletes every file record, attempts source-post deletion, and tracks required manual cleanup
+- Removed source tombstones prevent edited posts from silently re-indexing; failed Telegram deletions remain retryable
 - Public access initially; owner can switch to approval or allowlist
 - Native scoped command menus plus user/admin inline dashboards
 - Protected delivery through `protect_content=True`
@@ -60,7 +64,8 @@ The catalog stores Telegram source channel/message references and Telegram file 
 4. Keep database and storage channels private.
 5. Keep storage-channel “Restrict Saving Content” disabled so old posts can be forwarded to the owner for `/index`. Delivered files are protected separately by the bot.
 6. Add and start the bot before bulk uploading. Telegram only retains undelivered updates for a limited period.
-7. Do not place the real bot token in source control or send it in chat.
+7. Do not place real bot/GitHub/Railway tokens in source control or send them in chat.
+8. Owner catalog-title removal is irreversible. Verify the title and file count on both confirmation screens before deleting.
 
 ## Required channel permissions
 
@@ -76,7 +81,7 @@ The bot also pins its manifest message.
 
 ### Category storage channels
 
-Add the bot as an administrator before registering the channel. The application verifies that each category channel is a private channel and that the bot is an administrator.
+Add the bot as an administrator before registering the channel, with **Delete Messages** permission. The application verifies privacy, administrator status, and deletion permission for newly registered or changed channels. Existing registered channels must also be updated with Delete Messages permission before using permanent title removal.
 
 ## Environment configuration
 
@@ -197,6 +202,23 @@ User native commands are intentionally short:
 ```
 
 The owner receives additional scoped commands for administration.
+
+## Watchlist panel and sharing
+
+Open `/watchlist` or Main Menu → My watchlist. The panel supports:
+
+1. **From catalog** — choose any currently enabled dynamic category, type a search term, select an indexed title, and choose To Watch, On Hold, or Completed.
+2. **Manual title** — choose a dynamic category, type any title up to 160 characters, and choose one of the same three statuses.
+3. **My titles** — view entries, change status, remove an entry, or open its catalog page when one is linked and still available.
+4. **Community lists** — browse other active users' public watchlists read-only. Shared viewers cannot change or remove another user's entries.
+
+Watchlists are public to other active bot users by default, as requested. Each user can switch their own list to private from the Watchlist panel. A catalog title removed by the owner remains as a text-only watchlist entry; catalog removal does not edit personal watchlists.
+
+## Permanent catalog-title removal
+
+The owner can open Admin Panel → Catalog → Remove a title. The flow shows the title and complete file count, then requires a second irreversible confirmation. The bot first commits removal from file delivery and creates source tombstones. It then attempts to delete every associated Telegram source-channel post.
+
+Telegram's Bot API normally refuses deletion more than 48 hours after a message was sent. If permission, age, or another Telegram error prevents deletion, the title remains unavailable and its old posts cannot automatically re-index. Admin Panel → Catalog displays **Pending source deletions**, with actions to retry or—after the owner manually deletes old channel posts—confirm manual cleanup. Watchlist entries are intentionally unaffected.
 
 ## Access modes
 

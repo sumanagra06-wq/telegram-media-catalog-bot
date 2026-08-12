@@ -94,6 +94,9 @@ async def index_source_message(
     # add a previously missed post from a legacy channel.
     if (source_chat_id != category.active_channel_id and not allow_legacy) or not category.enabled:
         return False
+    if catalog.is_source_removed(source_chat_id, source_message_id):
+        # Owner-deleted source posts are tombstoned so edits cannot silently re-add them.
+        return False
     media = _media(message)
     if media is None:
         return False

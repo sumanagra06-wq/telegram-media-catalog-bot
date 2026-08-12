@@ -1,9 +1,28 @@
 from app.metadata import parse_metadata
-from app.models import CatalogState, MediaType, WatchStatus
+from app.models import (
+    CatalogState,
+    Category,
+    MediaType,
+    UserProfile,
+    UserStatus,
+    WatchlistEntry,
+    WatchStatus,
+)
 from app.repositories import CatalogRepository
 from app.services import CatalogQueryService, SearchSessionStore
 from app.storage import MemorySnapshotBackend, StateStore
-from app.ui import content_screen, search_results, season_screen
+from app.ui import (
+    content_screen,
+    public_watchlist_directory,
+    search_results,
+    season_screen,
+    watchlist_add_method,
+    watchlist_category_picker,
+    watchlist_entries,
+    watchlist_entry_detail,
+    watchlist_home,
+    watchlist_status_picker,
+)
 
 
 def _callbacks(markup):
@@ -41,17 +60,64 @@ async def test_core_inline_callback_data_is_valid_and_statuses_are_exact():
         content=content,
         category=category,
         query=query,
-        watch_status=WatchStatus.ON_HOLD,
         back_token=session.token,
     )
     _, season_markup = season_screen(content, 2, query, session.token, 0)
+    _, status_markup = watchlist_status_picker(content.title, "wacs:test")
 
-    callbacks = _callbacks(search_markup) + _callbacks(content_markup) + _callbacks(season_markup)
+    callbacks = (
+        _callbacks(search_markup)
+        + _callbacks(content_markup)
+        + _callbacks(season_markup)
+        + _callbacks(status_markup)
+    )
     assert callbacks
     assert all(len(value.encode("utf-8")) <= 64 for value in callbacks)
 
-    labels = [button.text for row in content_markup.inline_keyboard for button in row]
+    labels = [button.text for row in status_markup.inline_keyboard for button in row]
     assert any("To Watch" in label for label in labels)
     assert any("On Hold" in label for label in labels)
     assert any("Completed" in label for label in labels)
     assert not any("Watching" in label or "Dropped" in label for label in labels)
+
+
+def test_watchlist_panel_callbacks_are_bounded_and_shared_details_are_read_only():
+    category = Category(
+        id="cat_movies",
+        name="Movies",
+        slug="movies",
+        active_channel_id=-1001,
+    )
+    entry = WatchlistEntry(
+        id="w_entry123",
+        content_id="c_content123",
+        title="Interstellar",
+        category_id=category.id,
+        category_name=category.name,
+        status=WatchStatus.TO_WATCH,
+    )
+    owner = UserProfile(
+        telegram_user_id=123456789,
+        first_name="Alice",
+        username="alice",
+        status=UserStatus.ACTIVE,
+        watchlist={entry.id: entry},
+    )
+    markups = [
+        watchlist_home(owner)[1],
+        watchlist_add_method()[1],
+        watchlist_category_picker([category], "wamc", "Manual title")[1],
+        watchlist_status_picker(entry.title, "wacs:c_content123")[1],
+        watchlist_entries(owner, [entry], 0, own=True)[1],
+        watchlist_entries(owner, [entry], 0, own=False)[1],
+        watchlist_entry_detail(entry, owner, own=True, content_available=True)[1],
+        watchlist_entry_detail(entry, owner, own=False, content_available=True)[1],
+        public_watchlist_directory([owner], 0)[1],
+    ]
+    callbacks = [value for markup in markups for value in _callbacks(markup)]
+    assert callbacks
+    assert all(len(value.encode("utf-8")) <= 64 for value in callbacks)
+
+    shared_markup = watchlist_entry_detail(entry, owner, own=False, content_available=True)[1]
+    shared_callbacks = _callbacks(shared_markup)
+    assert not any(value.startswith(("wlu:", "wld:")) for value in shared_callbacks)

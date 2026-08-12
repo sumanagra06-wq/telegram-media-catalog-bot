@@ -15,6 +15,7 @@ from .models import (
     FileRecord,
     UserProfile,
     UserStatus,
+    WatchlistEntry,
     WatchStatus,
 )
 from .services import CatalogQueryService, SearchSession, variant_label
@@ -124,7 +125,6 @@ def content_screen(
     content: ContentRecord,
     category: Category,
     query: CatalogQueryService,
-    watch_status: WatchStatus | None,
     back_token: str = "0",
     back_page: int = 0,
 ) -> tuple[str, InlineKeyboardMarkup]:
@@ -165,24 +165,6 @@ def content_screen(
                     )
                 )
 
-    watch_buttons = []
-    labels = {
-        WatchStatus.TO_WATCH: "🕓 To Watch",
-        WatchStatus.ON_HOLD: "⏸ On Hold",
-        WatchStatus.COMPLETED: "✅ Completed",
-    }
-    for status in WatchStatus:
-        selected = " ✓" if watch_status == status else ""
-        watch_buttons.append(
-            InlineKeyboardButton(
-                text=labels[status] + selected,
-                callback_data=f"wl:{content.id}:{WATCH_CODES[status]}",
-            )
-        )
-    builder.row(*watch_buttons[:2])
-    builder.row(
-        watch_buttons[2], InlineKeyboardButton(text="🗑 Remove", callback_data=f"wl:{content.id}:r")
-    )
     # This is a search-navigation sentinel, not a credential.
     if back_token != "0":  # nosec B105
         builder.row(
@@ -313,62 +295,111 @@ def pack_screen(
     )
 
 
-def watchlist_home(
-    user: UserProfile, categories: list[Category]
-) -> tuple[str, InlineKeyboardMarkup]:
-    status_counts = {status: 0 for status in WatchStatus}
-    category_counts = {category.id: 0 for category in categories}
-    for entry in user.watchlist.values():
-        status_counts[entry.status] += 1
-        if entry.category_id in category_counts:
-            category_counts[entry.category_id] += 1
-
+def watchlist_home(user: UserProfile) -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="➕ Add title", callback_data="wla:start"))
     builder.row(
-        InlineKeyboardButton(
-            text=f"🕓 To Watch — {status_counts[WatchStatus.TO_WATCH]}",
-            callback_data="wls:t:0",
-        ),
-        InlineKeyboardButton(
-            text=f"⏸ On Hold — {status_counts[WatchStatus.ON_HOLD]}",
-            callback_data="wls:h:0",
-        ),
+        InlineKeyboardButton(text=f"📚 My titles — {len(user.watchlist)}", callback_data="wlm:0"),
+        InlineKeyboardButton(text="🌐 Community lists", callback_data="wlp:0"),
     )
     builder.row(
         InlineKeyboardButton(
-            text=f"✅ Completed — {status_counts[WatchStatus.COMPLETED]}",
-            callback_data="wls:c:0",
+            text="🔒 Make my list private" if user.watchlist_public else "🌐 Share my list",
+            callback_data=f"wlvis:{0 if user.watchlist_public else 1}",
         )
     )
+    builder.row(InlineKeyboardButton(text="🏠 Main menu", callback_data="menu:home"))
+    visibility = "Public to active bot users" if user.watchlist_public else "Private"
+    return (
+        (
+            "📚 <b>Watchlist</b>\n\n"
+            f"Saved titles: {len(user.watchlist)}\n"
+            f"Visibility: {visibility}\n\n"
+            "Add an indexed catalog title or keep any custom title manually."
+        ),
+        builder.as_markup(),
+    )
+
+
+def watchlist_add_method() -> tuple[str, InlineKeyboardMarkup]:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🎞 From catalog", callback_data="wla:catalog"),
+        InlineKeyboardButton(text="✍️ Manual title", callback_data="wla:manual"),
+    )
+    builder.row(InlineKeyboardButton(text="◀️ Watchlist", callback_data="menu:watchlist"))
+    return "➕ <b>Add title</b>\n\nChoose how to add it:", builder.as_markup()
+
+
+def watchlist_category_picker(
+    categories: list[Category], callback_prefix: str, heading: str
+) -> tuple[str, InlineKeyboardMarkup]:
+    builder = InlineKeyboardBuilder()
     for category in categories:
         builder.row(
             InlineKeyboardButton(
-                text=f"🗂 {compact_label(category.name)} — {category_counts[category.id]}",
-                callback_data=f"wlc:{category.id}:0",
+                text=f"🗂 {compact_label(category.name)}",
+                callback_data=f"{callback_prefix}:{category.id}",
             )
         )
-    builder.row(InlineKeyboardButton(text="🏠 Main menu", callback_data="menu:home"))
-    return f"📚 <b>My watchlist</b>\n\nSaved titles: {len(user.watchlist)}", builder.as_markup()
+    builder.row(InlineKeyboardButton(text="◀️ Add title", callback_data="wla:start"))
+    text = f"➕ <b>{safe_html(heading)}</b>\n\nChoose a category:"
+    if not categories:
+        text += "\n\nNo enabled categories are available."
+    return text, builder.as_markup()
+
+
+def watchlist_status_picker(title: str, callback_prefix: str) -> tuple[str, InlineKeyboardMarkup]:
+    builder = InlineKeyboardBuilder()
+    labels = {
+        WatchStatus.TO_WATCH: "🕓 To Watch",
+        WatchStatus.ON_HOLD: "⏸ On Hold",
+        WatchStatus.COMPLETED: "✅ Completed",
+    }
+    for status in WatchStatus:
+        builder.row(
+            InlineKeyboardButton(
+                text=labels[status],
+                callback_data=f"{callback_prefix}:{WATCH_CODES[status]}",
+            )
+        )
+    builder.row(InlineKeyboardButton(text="Cancel", callback_data="menu:watchlist"))
+    return (
+        f"➕ <b>{safe_html(title)}</b>\n\nChoose its watchlist status:",
+        builder.as_markup(),
+    )
+
+
+def _watch_status_label(status: WatchStatus) -> str:
+    return {
+        WatchStatus.TO_WATCH: "🕓 To Watch",
+        WatchStatus.ON_HOLD: "⏸ On Hold",
+        WatchStatus.COMPLETED: "✅ Completed",
+    }[status]
 
 
 def watchlist_entries(
-    title: str,
-    entries: list,
+    owner: UserProfile,
+    entries: list[WatchlistEntry],
     page: int,
-    prefix: str,
+    *,
+    own: bool,
     page_size: int = 6,
 ) -> tuple[str, InlineKeyboardMarkup]:
     visible, page, pages = page_slice(entries, page, page_size)
     builder = InlineKeyboardBuilder()
     for entry in visible:
-        year = f" ({entry.year})" if entry.year else ""
+        callback_data = (
+            f"wle:{entry.id}:{page}" if own else f"wved:{owner.telegram_user_id}:{entry.id}:{page}"
+        )
         builder.row(
             InlineKeyboardButton(
-                text=compact_label(entry.title + year, 58),
-                callback_data=f"ct:{entry.content_id}:0:0",
+                text=compact_label(f"{_watch_status_label(entry.status)} • {entry.title}", 58),
+                callback_data=callback_data,
             )
         )
     navigation: list[InlineKeyboardButton] = []
+    prefix = "wlm" if own else f"wlv:{owner.telegram_user_id}"
     if page > 0:
         navigation.append(
             InlineKeyboardButton(text="◀️ Previous", callback_data=f"{prefix}:{page - 1}")
@@ -378,10 +409,87 @@ def watchlist_entries(
     if navigation:
         builder.row(*navigation)
     builder.row(
-        InlineKeyboardButton(text="◀️ Watchlist", callback_data="menu:watchlist"),
+        InlineKeyboardButton(
+            text="◀️ Watchlist" if own else "◀️ Community",
+            callback_data="menu:watchlist" if own else "wlp:0",
+        ),
         InlineKeyboardButton(text="🏠 Home", callback_data="menu:home"),
     )
-    return f"📚 <b>{safe_html(title)}</b>\n\nPage {page + 1} of {pages}", builder.as_markup()
+    name = "My titles" if own else f"{owner.first_name}’s watchlist"
+    text = f"📚 <b>{safe_html(name)}</b>\n\nPage {page + 1} of {pages}"
+    if not entries:
+        text += "\n\nNo titles have been added."
+    return text, builder.as_markup()
+
+
+def watchlist_entry_detail(
+    entry: WatchlistEntry,
+    owner: UserProfile,
+    *,
+    own: bool,
+    content_available: bool,
+    page: int = 0,
+) -> tuple[str, InlineKeyboardMarkup]:
+    builder = InlineKeyboardBuilder()
+    if own:
+        for status in WatchStatus:
+            selected = " ✓" if entry.status == status else ""
+            builder.row(
+                InlineKeyboardButton(
+                    text=_watch_status_label(status) + selected,
+                    callback_data=f"wlu:{entry.id}:{WATCH_CODES[status]}",
+                )
+            )
+        builder.row(
+            InlineKeyboardButton(text="🗑 Remove from list", callback_data=f"wld:{entry.id}")
+        )
+    if content_available and entry.content_id:
+        builder.row(
+            InlineKeyboardButton(
+                text="🎞 Open catalog title", callback_data=f"ct:{entry.content_id}:0:0"
+            )
+        )
+    builder.row(
+        InlineKeyboardButton(
+            text="◀️ My titles" if own else f"◀️ {owner.first_name}’s list",
+            callback_data=(f"wlm:{page}" if own else f"wlv:{owner.telegram_user_id}:{page}"),
+        )
+    )
+    availability = "Available in catalog" if content_available else "Text-only watchlist entry"
+    text = (
+        f"📚 <b>{safe_html(entry.title)}</b>\n\n"
+        f"Category: {safe_html(entry.category_name)}\n"
+        f"Status: {_watch_status_label(entry.status)}\n"
+        f"Source: {availability}"
+    )
+    return text, builder.as_markup()
+
+
+def public_watchlist_directory(
+    users: list[UserProfile], page: int, page_size: int = 8
+) -> tuple[str, InlineKeyboardMarkup]:
+    visible, page, pages = page_slice(users, page, page_size)
+    builder = InlineKeyboardBuilder()
+    for user in visible:
+        username = f" @{user.username}" if user.username else ""
+        builder.row(
+            InlineKeyboardButton(
+                text=compact_label(f"👤 {user.first_name}{username} — {len(user.watchlist)}", 58),
+                callback_data=f"wlv:{user.telegram_user_id}:0",
+            )
+        )
+    navigation: list[InlineKeyboardButton] = []
+    if page > 0:
+        navigation.append(InlineKeyboardButton(text="◀️ Previous", callback_data=f"wlp:{page - 1}"))
+    if page + 1 < pages:
+        navigation.append(InlineKeyboardButton(text="Next ▶️", callback_data=f"wlp:{page + 1}"))
+    if navigation:
+        builder.row(*navigation)
+    builder.row(InlineKeyboardButton(text="◀️ Watchlist", callback_data="menu:watchlist"))
+    text = f"🌐 <b>Community watchlists</b>\n\nPage {page + 1} of {pages}"
+    if not users:
+        text += "\n\nNo other public watchlists are available."
+    return text, builder.as_markup()
 
 
 def admin_dashboard() -> tuple[str, InlineKeyboardMarkup]:

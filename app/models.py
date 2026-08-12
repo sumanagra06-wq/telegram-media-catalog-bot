@@ -118,20 +118,31 @@ class VersionedState(BaseModel):
     updated_at: str = Field(default_factory=utcnow_iso)
 
 
+class RemovedSourceRecord(BaseModel):
+    source_chat_id: int
+    source_message_id: int
+    content_title: str
+    telegram_deleted: bool = False
+    removed_at: str = Field(default_factory=utcnow_iso)
+    updated_at: str = Field(default_factory=utcnow_iso)
+
+
 class CatalogState(VersionedState):
-    schema_version: int = 1
+    schema_version: int = 2
     kind: str = "catalog"
     categories: dict[str, Category] = Field(default_factory=dict)
     contents: dict[str, ContentRecord] = Field(default_factory=dict)
     files: dict[str, FileRecord] = Field(default_factory=dict)
     source_lookup: dict[str, str] = Field(default_factory=dict)
     content_lookup: dict[str, str] = Field(default_factory=dict)
+    removed_sources: dict[str, RemovedSourceRecord] = Field(default_factory=dict)
     failures: dict[str, IndexFailure] = Field(default_factory=dict)
     audit_events: list[AuditEvent] = Field(default_factory=list)
 
 
 class WatchlistEntry(BaseModel):
-    content_id: str
+    id: str = ""
+    content_id: str | None = None
     title: str
     year: int | None = None
     category_id: str
@@ -148,6 +159,7 @@ class UserProfile(BaseModel):
     username: str | None = None
     language_code: str | None = None
     status: UserStatus
+    watchlist_public: bool = True
     watchlist: dict[str, WatchlistEntry] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utcnow_iso)
     updated_at: str = Field(default_factory=utcnow_iso)
@@ -155,7 +167,7 @@ class UserProfile(BaseModel):
 
 
 class UsersState(VersionedState):
-    schema_version: int = 1
+    schema_version: int = 2
     kind: str = "users"
     access_mode: AccessMode = AccessMode.PUBLIC
     users: dict[str, UserProfile] = Field(default_factory=dict)

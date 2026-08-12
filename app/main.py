@@ -114,6 +114,8 @@ def create_application(config: Config) -> web.Application:
         await _validate_database_channel(bot, config.user_database_channel_id, "user")
         await catalog_store.initialize()
         await users_store.initialize()
+        await catalog.migrate_schema()
+        await users.migrate_schema()
         repair = await catalog.repair_episodic_grouping()
         if repair.changed:
             LOGGER.warning(

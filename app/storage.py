@@ -184,6 +184,7 @@ class TelegramSnapshotBackend:
         old_previous = self.manifest.previous if self.manifest else None
         new_manifest = SnapshotManifest(
             kind=self.kind,
+            schema_version=int(payload.get("schema_version", 1)),
             current=new_ref,
             previous=self.manifest.current if self.manifest else None,
             updated_at=utcnow_iso(),

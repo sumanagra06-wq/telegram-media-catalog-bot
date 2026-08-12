@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter
+from collections import Counter, defaultdict
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
@@ -20,7 +20,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..config import Config
 from ..filters import NotOwnerFilter, OwnerFilter
-from ..models import AccessMode, CategoryMode, UserStatus
+from ..models import AccessMode, CategoryMode, RemovedSourceRecord, UserStatus
 from ..repositories import CatalogRepository, UserRepository
 from ..ui import (
     access_mode_panel,
@@ -75,6 +75,12 @@ async def _validate_private_channel(bot: Bot, channel_id: int, config: Config) -
     member = await bot.get_chat_member(channel_id, (await bot.get_me()).id)
     if member.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
         raise ValueError("The bot must be an administrator in the storage channel")
+    if member.status == ChatMemberStatus.ADMINISTRATOR and not getattr(
+        member, "can_delete_messages", False
+    ):
+        raise ValueError(
+            "The bot needs Delete Messages permission for owner-requested permanent removal"
+        )
     return chat.title or str(channel_id)
 
 
@@ -436,22 +442,39 @@ async def _files_text(catalog: CatalogRepository) -> str:
     state = catalog.snapshot()
     unavailable = [item for item in state.files.values() if not item.available]
     media = Counter(item.media_type.value for item in state.files.values())
+    pending_deletions = len(catalog.pending_removed_sources())
     return (
         "🎞 <b>Catalog files</b>\n\n"
         f"Titles: {len(state.contents)}\n"
         f"Files: {len(state.files)}\n"
         f"Videos: {media['video']}\n"
         f"Documents: {media['document']}\n"
-        f"Unavailable: {len(unavailable)}"
+        f"Unavailable: {len(unavailable)}\n"
+        f"Pending source deletions: {pending_deletions}"
     )
 
 
 def _files_markup(catalog: CatalogRepository) -> InlineKeyboardBuilder:
     unavailable = sum(1 for item in catalog.snapshot().files.values() if not item.available)
+    pending_deletions = len(catalog.pending_removed_sources())
     builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🗑 Remove a title", callback_data="adr:0"))
     if unavailable:
         builder.row(
             InlineKeyboardButton(text=f"⚠️ Unavailable files — {unavailable}", callback_data="afu:0")
+        )
+    if pending_deletions:
+        builder.row(
+            InlineKeyboardButton(
+                text=f"🔁 Retry source deletions — {pending_deletions}",
+                callback_data="adp:retry",
+            )
+        )
+        builder.row(
+            InlineKeyboardButton(
+                text="✅ Confirm manually deleted posts",
+                callback_data="adp:clear",
+            )
         )
     builder.row(InlineKeyboardButton(text="◀️ Admin panel", callback_data="admin:home"))
     return builder
@@ -467,6 +490,247 @@ async def files_command(message: Message, catalog: CatalogRepository) -> None:
 @router.callback_query(F.data == "admin:files", owner)
 async def files_callback(callback: CallbackQuery, catalog: CatalogRepository) -> None:
     await callback.answer()
+    await edit_screen(callback, await _files_text(catalog), _files_markup(catalog).as_markup())
+
+
+async def _delete_source_posts(
+    bot: Bot,
+    catalog: CatalogRepository,
+    sources: list[RemovedSourceRecord],
+) -> tuple[int, int]:
+    grouped: dict[int, list[RemovedSourceRecord]] = defaultdict(list)
+    for source in sources:
+        grouped[source.source_chat_id].append(source)
+
+    deleted: list[tuple[int, int]] = []
+    failed = 0
+    for chat_id, items in grouped.items():
+        for start in range(0, len(items), 100):
+            chunk = items[start : start + 100]
+            try:
+                result = await bot.delete_messages(
+                    chat_id=chat_id,
+                    message_ids=[item.source_message_id for item in chunk],
+                )
+                if not result:
+                    raise RuntimeError("Telegram did not confirm batch deletion")
+                deleted.extend((chat_id, item.source_message_id) for item in chunk)
+                continue
+            except Exception:
+                LOGGER.warning(
+                    "Batch source deletion failed in %s; retrying individually",
+                    chat_id,
+                    exc_info=True,
+                )
+            for item in chunk:
+                try:
+                    result = await bot.delete_message(chat_id, item.source_message_id)
+                    if not result:
+                        raise RuntimeError("Telegram did not confirm message deletion")
+                    deleted.append((chat_id, item.source_message_id))
+                except Exception:
+                    failed += 1
+                    LOGGER.warning(
+                        "Could not delete removed source %s:%s",
+                        chat_id,
+                        item.source_message_id,
+                        exc_info=True,
+                    )
+    if deleted:
+        await catalog.mark_removed_sources_deleted(deleted)
+    return len(deleted), failed
+
+
+@router.callback_query(F.data.startswith("adr:"), owner)
+async def removable_titles(callback: CallbackQuery, catalog: CatalogRepository) -> None:
+    page = int(callback.data.split(":", 1)[1])
+    contents = sorted(
+        catalog.snapshot().contents.values(),
+        key=lambda item: (item.title.casefold(), item.year or 0),
+    )
+    visible, page, pages = page_slice(contents, page, 6)
+    builder = InlineKeyboardBuilder()
+    for content in visible:
+        file_count = len(catalog.files_for_content(content.id, available_only=False))
+        builder.row(
+            InlineKeyboardButton(
+                text=compact_label(f"{content.title} — {file_count} files", 58),
+                callback_data=f"adrt:{content.id}:{page}",
+            )
+        )
+    navigation = []
+    if page > 0:
+        navigation.append(InlineKeyboardButton(text="◀️ Previous", callback_data=f"adr:{page - 1}"))
+    if page + 1 < pages:
+        navigation.append(InlineKeyboardButton(text="Next ▶️", callback_data=f"adr:{page + 1}"))
+    if navigation:
+        builder.row(*navigation)
+    builder.row(InlineKeyboardButton(text="◀️ Catalog", callback_data="admin:files"))
+    text = f"🗑 <b>Remove catalog title</b>\n\nPage {page + 1} of {pages}"
+    if not contents:
+        text += "\n\nThe catalog is empty."
+    await callback.answer()
+    await edit_screen(callback, text, builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("adrt:"), owner)
+async def removable_title_detail(callback: CallbackQuery, catalog: CatalogRepository) -> None:
+    _, content_id, page_text = callback.data.split(":", 2)
+    content = catalog.get_content(content_id)
+    if content is None:
+        await callback.answer("Title not found.", show_alert=True)
+        return
+    files = catalog.files_for_content(content.id, available_only=False)
+    category = catalog.get_category(content.category_id)
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="Continue to permanent removal",
+            callback_data=f"adrc:{content.id}:{page_text}",
+        )
+    )
+    builder.row(InlineKeyboardButton(text="◀️ Titles", callback_data=f"adr:{page_text}"))
+    text = (
+        f"🗑 <b>{safe_html(content.title)}</b>\n\n"
+        f"Category: {safe_html(category.name if category else 'Unknown')}\n"
+        f"Files and source posts: {len(files)}\n\n"
+        "This owner-only action removes the title from file delivery and attempts to "
+        "delete all associated source-channel posts. Telegram normally refuses bot deletion "
+        "after 48 hours; those posts must be deleted manually."
+    )
+    await callback.answer()
+    await edit_screen(callback, text, builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("adrc:"), owner)
+async def remove_title_confirm(callback: CallbackQuery, catalog: CatalogRepository) -> None:
+    _, content_id, page_text = callback.data.split(":", 2)
+    content = catalog.get_content(content_id)
+    if content is None:
+        await callback.answer("Title not found.", show_alert=True)
+        return
+    files = catalog.files_for_content(content.id, available_only=False)
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text=f"Permanently delete {len(files)} files",
+            callback_data=f"adrx:{content.id}",
+        )
+    )
+    builder.row(InlineKeyboardButton(text="Cancel", callback_data=f"adrt:{content.id}:{page_text}"))
+    await callback.answer()
+    await edit_screen(
+        callback,
+        "⚠️ <b>Permanent deletion</b>\n\n"
+        f"Delete <b>{safe_html(content.title)}</b>, all catalog file records, and attempt "
+        "deletion of all Telegram source posts? This cannot be undone. Posts older than "
+        "Telegram’s bot-deletion window require manual deletion.",
+        builder.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("adrx:"), owner)
+async def remove_title_execute(
+    callback: CallbackQuery,
+    bot: Bot,
+    catalog: CatalogRepository,
+    config: Config,
+) -> None:
+    content_id = callback.data.split(":", 1)[1]
+    try:
+        result = await catalog.remove_content(content_id, callback.from_user.id)
+    except ValueError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    deleted, failed = await _delete_source_posts(bot, catalog, list(result.sources))
+    summary = (
+        "🗑 <b>Catalog title removed</b>\n\n"
+        f"Title: {safe_html(result.content.title)}\n"
+        f"Catalog files removed: {len(result.files)}\n"
+        f"Telegram source posts deleted: {deleted}\n"
+        f"Pending source deletions: {failed}"
+    )
+    try:
+        await bot.send_message(
+            config.file_database_channel_id,
+            summary,
+            disable_notification=True,
+        )
+    except Exception:
+        LOGGER.warning("Could not write title-removal audit card", exc_info=True)
+    await callback.answer("Title removed from file delivery.")
+    await edit_screen(callback, summary, _files_markup(catalog).as_markup())
+
+
+@router.callback_query(F.data == "adp:retry", owner)
+async def retry_source_deletions(
+    callback: CallbackQuery,
+    bot: Bot,
+    catalog: CatalogRepository,
+) -> None:
+    pending = catalog.pending_removed_sources()
+    if not pending:
+        await callback.answer("No pending source deletions.")
+        await edit_screen(callback, await _files_text(catalog), _files_markup(catalog).as_markup())
+        return
+    deleted, failed = await _delete_source_posts(bot, catalog, pending)
+    await callback.answer(f"Deleted {deleted}; pending {failed}.")
+    await edit_screen(callback, await _files_text(catalog), _files_markup(catalog).as_markup())
+
+
+@router.callback_query(F.data == "adp:clear", owner)
+async def confirm_manual_source_cleanup(
+    callback: CallbackQuery,
+    catalog: CatalogRepository,
+) -> None:
+    pending = catalog.pending_removed_sources()
+    if not pending:
+        await callback.answer("No pending source deletions.")
+        return
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="Confirm manually deleted", callback_data="adp:clearc"),
+        InlineKeyboardButton(text="Cancel", callback_data="admin:files"),
+    )
+    lines = [
+        "⚠️ <b>Pending Telegram source posts</b>",
+        "",
+        "Delete these posts manually before confirming:",
+        "",
+    ]
+    for item in pending[:20]:
+        lines.append(
+            f"• {safe_html(item.content_title)} — channel <code>{item.source_chat_id}</code>, "
+            f"message <code>{item.source_message_id}</code>"
+        )
+    if len(pending) > 20:
+        lines.append(f"…and {len(pending) - 20} more. Retry automatic deletion first.")
+    lines.extend(
+        [
+            "",
+            f"Mark all {len(pending)} pending source posts as manually deleted?",
+        ]
+    )
+    await callback.answer()
+    await edit_screen(callback, "\n".join(lines), builder.as_markup())
+
+
+@router.callback_query(F.data == "adp:clearc", owner)
+async def confirm_manual_source_cleanup_execute(
+    callback: CallbackQuery,
+    catalog: CatalogRepository,
+) -> None:
+    pending = catalog.pending_removed_sources()
+    confirmed = await catalog.mark_removed_sources_deleted(
+        (item.source_chat_id, item.source_message_id) for item in pending
+    )
+    if confirmed:
+        await catalog.add_audit(
+            "content.sources_manual_confirmation",
+            f"Owner confirmed manual deletion of {confirmed} source posts",
+            callback.from_user.id,
+        )
+    await callback.answer(f"Marked {confirmed} source posts as manually deleted.")
     await edit_screen(callback, await _files_text(catalog), _files_markup(catalog).as_markup())
 
 
@@ -854,6 +1118,6 @@ async def bot_settings_callback(
 
 
 @router.callback_query(F.data.startswith("admin:"), not_owner)
-@router.callback_query(F.data.startswith(("ac", "au", "access", "adb")), not_owner)
+@router.callback_query(F.data.startswith(("ac", "ad", "au", "access")), not_owner)
 async def unauthorized_admin_callback(callback: CallbackQuery) -> None:
     await callback.answer("You are not authorized.", show_alert=True)

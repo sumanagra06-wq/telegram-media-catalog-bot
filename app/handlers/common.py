@@ -64,12 +64,10 @@ async def start_command(
             if category:
                 from ..ui import content_screen
 
-                entry = profile.watchlist.get(content.id)
                 text, markup = content_screen(
                     content=content,
                     category=category,
                     query=query,
-                    watch_status=entry.status if entry else None,
                 )
                 await message.answer(text, reply_markup=markup)
                 return
@@ -95,7 +93,7 @@ async def help_command(message: Message) -> None:
         "2. Select the best matching result.\n"
         "3. For a series, choose its season and episode.\n"
         "4. Choose a language/quality only when multiple versions exist.\n\n"
-        "Use /watchlist to open your saved To Watch, On Hold and Completed titles."
+        "Use /watchlist to add manual or catalog titles and browse shared community lists."
     )
 
 

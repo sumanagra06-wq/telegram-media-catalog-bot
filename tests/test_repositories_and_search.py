@@ -229,7 +229,7 @@ async def test_user_access_and_exact_watchlist_statuses(user_pair, catalog_pair)
     assert created is True
     assert user.status == UserStatus.ACTIVE
 
-    entry = await users.set_watch_status(
+    entry, entry_created = await users.upsert_watchlist_entry(
         user_id=42,
         content_id=content.id,
         title=content.title,
@@ -238,6 +238,8 @@ async def test_user_access_and_exact_watchlist_statuses(user_pair, catalog_pair)
         category_name=category.name,
         status=WatchStatus.ON_HOLD,
     )
+    assert entry_created is True
+    assert entry.id.startswith("w_")
     assert entry.status == WatchStatus.ON_HOLD
     assert {status.value for status in WatchStatus} == {"to_watch", "on_hold", "completed"}
 
