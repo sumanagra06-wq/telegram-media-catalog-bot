@@ -7,34 +7,21 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..config import Config
 from ..guards import access_denied_text, can_use_bot, ensure_registered
-from ..models import WatchStatus
 from ..panels import PanelManager
 from ..presentation import ActionButton as InlineKeyboardButton
 from ..repositories import CatalogRepository, UserRepository
-from ..services import CatalogQueryService, SearchSession, SearchSessionStore
+from ..services import CatalogQueryService, SearchSessionStore
 from ..ui import (
     admin_dashboard,
-    bulk_watchlist_status_picker,
     panel_browse_categories,
     panel_workspace_home,
-    selectable_results,
+    search_results,
     watchlist_home,
 )
-from ..utils import safe_html
 
 router = Router(name="panel")
 router.callback_query.filter(F.message.chat.type == "private")
 DIVIDER = "━━━━━━━━━━━━━━━━━━"
-STATUS_CODES = {
-    "t": WatchStatus.TO_WATCH,
-    "h": WatchStatus.ON_HOLD,
-    "c": WatchStatus.COMPLETED,
-}
-STATUS_LABELS = {
-    WatchStatus.TO_WATCH: "To watch",
-    WatchStatus.ON_HOLD: "On hold",
-    WatchStatus.COMPLETED: "Completed",
-}
 
 
 async def _authorized_panel_callback(
@@ -84,44 +71,16 @@ def _search_prompt() -> tuple[str, InlineKeyboardMarkup]:
     )
     return (
         (
-            "🔎 <b>SEARCH & MULTI-SELECT</b>\n"
-            "<blockquote>No command needed—send a title next.</blockquote>\n"
+            "🔎 <b>SEARCH FOR A FILE</b>\n"
+            "<blockquote>Delivery-only search • send a title next.</blockquote>\n"
             f"{DIVIDER}\n"
             "⌨️ Type a movie or series name in your next message.\n\n"
-            "☑️ The result screen lets you tick up to 25 titles across pages, "
-            "then add them to one Watchlist status together.\n\n"
+            "🎯 Results open file, season, episode, and version controls only.\n"
+            "📚 To save titles, use the dedicated Watchlist tab.\n\n"
             "💡 Try <code>Dark</code> or <code>Dune 2021</code>."
         ),
         builder.as_markup(),
     )
-
-
-def _bulk_complete_markup() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text="📚 View my Watchlist",
-            callback_data="menu:watchlist",
-            style="primary",
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(text="🔎 Search again", callback_data="p:search"),
-        InlineKeyboardButton(text="🧭 Workspace", callback_data="p:home"),
-    )
-    builder.row(InlineKeyboardButton(text="✖️ Close workspace", callback_data="p:close"))
-    return builder.as_markup()
-
-
-def _session_contents(
-    session: SearchSession,
-    catalog: CatalogRepository,
-):
-    return [
-        content
-        for content_id in session.content_ids
-        if (content := catalog.get_content(content_id)) is not None
-    ]
 
 
 @router.callback_query(F.data == "p:home")
@@ -209,10 +168,15 @@ async def panel_browse_category_callback(
         callback.from_user.id,
         category.name,
         [content.id for content in contents],
-        selectable=True,
         result_heading=f"BROWSE · {category.name.upper()}",
     )
-    text, markup = selectable_results(session, contents, 0)
+    text, markup = search_results(
+        session,
+        contents,
+        0,
+        heading=f"BROWSE · {category.name.upper()}",
+        prompt="Choose a title to view and receive its files:",
+    )
     await callback.answer()
     await _workspace_render(callback, panels, text, markup)
 
@@ -250,10 +214,9 @@ async def panel_recent_callback(
         callback.from_user.id,
         "Recently added",
         [content.id for content in contents],
-        selectable=True,
         result_heading="RECENTLY ADDED",
     )
-    text, markup = selectable_results(session, contents, 0)
+    text, markup = search_results(session, contents, 0)
     await callback.answer()
     await _workspace_render(callback, panels, text, markup)
 
@@ -297,13 +260,13 @@ async def panel_help_callback(
         callback,
         panels,
         "❓ <b>HELP & QUICK GUIDE</b>\n"
-        "<blockquote>Search, select, save, and download.</blockquote>\n"
+        "<blockquote>Clean search, dedicated Watchlists, threaded delivery.</blockquote>\n"
         f"{DIVIDER}\n"
         "<b>1.</b> 🔎 Send a title or use Search\n"
-        "<b>2.</b> ☑️ Tick titles to save several together\n"
-        "<b>3.</b> 🎯 Tap a title name to open its files\n"
-        "<b>4.</b> ▶️ Choose a version for protected delivery\n\n"
-        "📚 Watchlists support To watch, On hold, and Completed.\n"
+        "<b>2.</b> 🎯 Open the matching title and choose its file\n"
+        "<b>3.</b> 📦 Receive protected media in the Deliveries topic\n"
+        "<b>4.</b> 📚 Use Watchlist—not Search—to save titles\n\n"
+        "🧹 Search messages and completed workspaces are automatically cleaned.\n"
         "⏱ Every workspace interaction restarts its 5-minute timer.",
         builder.as_markup(),
     )
@@ -328,139 +291,13 @@ async def panel_admin_callback(
     await _workspace_render(callback, panels, text, markup)
 
 
-@router.callback_query(F.data.startswith("px:"))
-async def panel_toggle_selection(
-    callback: CallbackQuery,
-    sessions: SearchSessionStore,
-    catalog: CatalogRepository,
-    users: UserRepository,
-    config: Config,
-    panels: PanelManager,
-) -> None:
-    if (
-        await _authorized_panel_callback(
-            callback,
-            users,
-            config,
-            panels,
-            workspace_only=True,
-        )
-        is None
-    ):
-        return
-    _, token, content_id, page_text = (callback.data or "").split(":", 3)
-    session = sessions.get(token, callback.from_user.id)
-    if session is None or not session.selectable or content_id not in session.content_ids:
-        await callback.answer("This selection expired. Start again.", show_alert=True)
-        return
-    if content_id in session.selected_content_ids:
-        session.selected_content_ids.remove(content_id)
-    elif len(session.selected_content_ids) >= 25:
-        await callback.answer("You can select up to 25 titles at once.", show_alert=True)
-        return
-    else:
-        session.selected_content_ids.add(content_id)
-    contents = _session_contents(session, catalog)
-    text, markup = selectable_results(session, contents, int(page_text))
+@router.callback_query(
+    F.data.startswith("px:") | F.data.startswith("pa:") | F.data.startswith("pw:")
+)
+async def retired_non_watchlist_selection(callback: CallbackQuery) -> None:
     await callback.answer(
-        f"{len(session.selected_content_ids)} selected",
-    )
-    await _workspace_render(callback, panels, text, markup)
-
-
-@router.callback_query(F.data.startswith("pa:"))
-async def panel_add_selected(
-    callback: CallbackQuery,
-    sessions: SearchSessionStore,
-    users: UserRepository,
-    config: Config,
-    panels: PanelManager,
-) -> None:
-    if (
-        await _authorized_panel_callback(
-            callback,
-            users,
-            config,
-            panels,
-            workspace_only=True,
-        )
-        is None
-    ):
-        return
-    _, token, page_text = (callback.data or "").split(":", 2)
-    session = sessions.get(token, callback.from_user.id)
-    if session is None or not session.selectable:
-        await callback.answer("This selection expired. Start again.", show_alert=True)
-        return
-    if not session.selected_content_ids:
-        await callback.answer("Select at least one title first.", show_alert=True)
-        return
-    text, markup = bulk_watchlist_status_picker(session, int(page_text))
-    await callback.answer()
-    await _workspace_render(callback, panels, text, markup)
-
-
-@router.callback_query(F.data.startswith("pw:"))
-async def panel_bulk_status_selected(
-    callback: CallbackQuery,
-    sessions: SearchSessionStore,
-    catalog: CatalogRepository,
-    users: UserRepository,
-    config: Config,
-    panels: PanelManager,
-) -> None:
-    if (
-        await _authorized_panel_callback(
-            callback,
-            users,
-            config,
-            panels,
-            workspace_only=True,
-        )
-        is None
-    ):
-        return
-    _, token, code, _page_text = (callback.data or "").split(":", 3)
-    session = sessions.get(token, callback.from_user.id)
-    status = STATUS_CODES.get(code)
-    if session is None or not session.selectable or status is None:
-        await callback.answer("This selection expired. Start again.", show_alert=True)
-        return
-    selected = []
-    for content_id in session.content_ids:
-        if content_id not in session.selected_content_ids:
-            continue
-        content = catalog.get_content(content_id)
-        category = catalog.get_category(content.category_id) if content else None
-        if content is None or category is None or not category.enabled:
-            await callback.answer(
-                "One selected title is no longer available. Review the selection and try again.",
-                show_alert=True,
-            )
-            return
-        selected.append((content, category.name))
-    if not selected:
-        await callback.answer("Select at least one available title first.", show_alert=True)
-        return
-    result = await users.bulk_upsert_catalog_watchlist(
-        user_id=callback.from_user.id,
-        items=selected,
-        status=status,
-    )
-    session.selected_content_ids.clear()
-    await callback.answer(f"✅ {len(result.entries)} titles saved.")
-    await _workspace_render(
-        callback,
-        panels,
-        "✅ <b>WATCHLIST UPDATED</b>\n"
-        f"<blockquote>{len(result.entries)} title{'s' if len(result.entries) != 1 else ''} "
-        "saved together</blockquote>\n"
-        f"{DIVIDER}\n"
-        f"📌 <b>Status</b>  •  {safe_html(STATUS_LABELS[status])}\n"
-        f"➕ <b>New entries</b>  •  {result.created}\n"
-        f"🔄 <b>Existing entries updated</b>  •  {result.updated}\n\n"
-        "All selected titles were committed in one database update.",
-        _bulk_complete_markup(),
+        "Watchlist additions now live only inside the Watchlist tab.",
+        show_alert=True,
     )
 
 

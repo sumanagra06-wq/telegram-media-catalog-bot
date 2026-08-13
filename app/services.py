@@ -24,7 +24,6 @@ class SearchSession:
     query: str
     content_ids: list[str]
     created_at: float
-    selectable: bool = False
     result_heading: str = "SEARCH RESULTS"
     selected_content_ids: set[str] = field(default_factory=set)
     alphabet_filter: str | None = None
@@ -45,7 +44,6 @@ class SearchSessionStore:
         query: str,
         content_ids: list[str],
         *,
-        selectable: bool = False,
         result_heading: str = "SEARCH RESULTS",
         context: str = "catalog",
     ) -> SearchSession:
@@ -57,7 +55,6 @@ class SearchSessionStore:
             query,
             content_ids,
             time.monotonic(),
-            selectable=selectable,
             result_heading=result_heading,
             context=context,
         )

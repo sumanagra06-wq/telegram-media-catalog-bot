@@ -29,9 +29,12 @@ A private-channel media catalog for movies and series. Telegram stores both the 
 - Dashboard-final interaction model with one emergency `/dashboard` repost command; `/start` remains hidden for Telegram onboarding/deep links and reply-based `/index` is owner-only recovery
 - One recoverable pinned dashboard per user and one in-place temporary workspace below it
 - Sliding five-minute workspace expiry with activity resets and restart cleanup
-- Checkbox-style multi-selection across Search, Browse, and Recently Added, with atomic bulk Watchlist insertion
+- Delivery-only Search, Browse, Recently Added, and title/file detail flows; they cannot add to Watchlists
+- Checkbox multi-selection only inside Watchlist → Add a title → Choose from the library, with atomic bulk insertion
 - One unified owner dashboard with an authorization-checked Admin Control Center entry
-- Protected delivery through `protect_content=True`
+- One persisted native private-chat topic named `📦 Deliveries` per user, with closed/deleted-topic recovery and protected delivery through `protect_content=True`
+- General-chat fallback whenever private topic setup or topic delivery is unavailable
+- Automatic typed-query and completed-workspace cleanup without deleting delivered media
 - Versioned, checksummed gzip snapshots in two private Telegram database channels
 - Current and previous snapshot fallback through a pinned manifest
 - Idempotent startup repair for legacy episode-specific title records; media is not re-uploaded
@@ -70,6 +73,7 @@ The catalog stores Telegram source channel/message references and Telegram file 
 6. Add and start the bot before bulk uploading. Telegram only retains undelivered updates for a limited period.
 7. Do not place real bot/GitHub/Railway tokens in source control or send them in chat.
 8. Owner catalog-title removal is irreversible. Verify the title and file count on both confirmation screens before deleting.
+9. Enable **Threaded Mode** for the bot in BotFather. Without it, the bot stays operational but protected files fall back to General instead of `📦 Deliveries`.
 
 ## Required channel permissions
 
@@ -109,12 +113,12 @@ PROTECT_DELIVERED_CONTENT=true
 
 ## First deployment
 
-1. Create the bot through BotFather.
+1. Create the bot through BotFather and enable **Threaded Mode** in its bot settings.
 2. Create two private database channels.
 3. Add the bot to both database channels with the required permissions.
 4. Configure all Railway variables.
 5. Deploy with one replica.
-6. Wait for `/health` to report `status: ok`.
+6. Wait for `/health` to report `status: ok` and `threaded_mode_enabled: true`. A `false` value is safe but means delivery is temporarily falling back to General.
 7. Open the bot privately and send `/start`.
 8. Add the bot as administrator to the Movies storage channel.
 9. Open Dashboard → Admin Control Center → Categories → Add category, then submit `Movies` and its private channel ID.
@@ -182,15 +186,17 @@ Users normally do not need a search command:
 Dark
 ```
 
-The bot sends ranked title buttons. Selecting a series opens seasons and then available episodes. One episode variant is delivered immediately; multiple variants display language/quality buttons. Movies show a Get File button or version buttons.
+The bot renders ranked title buttons in the one temporary General-chat workspace and deletes the typed query once the result or validation screen is ready. Selecting a series opens seasons and then available episodes. One episode variant is delivered immediately; multiple variants display language/quality buttons. Movies show a Get File button or version buttons. Messages typed inside a topic are never interpreted as title searches.
 
-Telegram onboarding through `/start` creates or recovers one dashboard message and asks Telegram to pin it in the private chat. Dashboard buttons create or reuse one temporary workspace message below it. Navigation edits that same workspace instead of adding another menu card. Every callback or user-message interaction resets a five-minute inactivity timer; after five quiet minutes the workspace is deleted. A restart removes or disables stale workspace cards while preserving the pinned dashboard reference. If the dashboard is lost or buried, `/dashboard` posts and pins a fresh replacement, then retires the old dashboard card.
+Telegram onboarding through `/start` creates or recovers one dashboard message and asks Telegram to pin it in General. Dashboard buttons create or reuse one temporary workspace below it. Navigation edits that same workspace instead of adding another menu card. Every callback or user-message interaction resets a five-minute inactivity timer; after five quiet minutes the workspace is deleted. A restart removes or disables stale workspace cards while preserving the pinned dashboard reference. If the dashboard is lost or buried, `/dashboard` posts and pins a fresh replacement, then retires the old dashboard card.
 
-Search, Browse, and Recently Added results show a separate `☐`/`✅` toggle beside each title. Selections remain checked across result pages. Users can select up to 25 titles, choose **Add Selected**, then assign To Watch, On Hold, or Completed to the whole selection in one atomic database update. The adjacent title button still opens normal details and protected delivery.
+Search, Browse, Recently Added, and all title/file detail screens are delivery-only: there are no Watchlist checkboxes or mutation actions. Historical `px:`, `pa:`, and `pw:` discovery callbacks only show an expiry notice and cannot modify a Watchlist. Adding manual or indexed titles is exclusive to Dashboard → Watchlist.
 
 Watchlist → Add a title → Choose from the library opens each dynamic collection as a complete alphabetical catalog. Titles are paginated, both the checkbox and adjacent title button toggle selection, and selections survive page/filter changes. Power tools provide in-category title search, unsaved-only filtering, A–Z/`#` jumping, Select Page, Clear Selection, and selected-only review. A `📚` marker identifies titles already saved before a bulk status update.
 
-After any successful movie, episode, variant, or season-pack delivery, the old temporary workspace is removed and a fresh dashboard card is posted below the delivered file. This keeps the controls at the bottom of the chat without creating two active workspaces.
+On the first protected delivery, the bot creates and persists one native private-chat topic named `📦 Deliveries`. Movies, episodes, documents, and every season-pack part are copied there with content protection. A closed topic is reopened; an invalid or deleted topic is replaced without deleting the old topic or its delivered media. If Threaded Mode, topic creation, persistence, or a retry is unavailable, the same request falls back to General so retrieval is not blocked.
+
+After a successful delivery, only the temporary source/workspace card is removed. The pinned dashboard remains in General, no replacement dashboard is posted below the file, and delivered/shared media is never registered for automatic deletion.
 
 The owner's pinned card is the same user dashboard with one additional Admin Control Center entry. Owner authorization is still enforced by the handler, not merely by hiding the button. The dashboard is the final user-facing interaction system; old native user and admin commands are no longer registered or handled.
 
@@ -260,7 +266,7 @@ pip-audit -r requirements.txt
 bandit -q -r app
 ```
 
-The test suite covers the supplied real caption formats, split archives, metadata allowlisting, dynamic categories, duplicate update idempotency, search ordering, series grouping, exact watchlist statuses, snapshot rollback/fallback, Telegram callback-size limits, pinned-dashboard recovery, concurrent workspace reuse, post-delivery control relocation, sliding expiry, restart cleanup, checkbox state across pages and alphabet filters, editable community names, always-public enforcement, owner authorization, and atomic bulk Watchlist rollback.
+The test suite covers the supplied real caption formats, split archives, metadata allowlisting, dynamic categories, duplicate update idempotency, search ordering, series grouping, exact watchlist statuses, snapshot rollback/fallback, Telegram callback-size limits, pinned-dashboard recovery, concurrent workspace reuse, delivery-topic create/reuse/reopen/replace behavior, General fallback, delivered-media retention, typed-query cleanup, topic-message exclusion, sliding expiry, restart cleanup, dedicated Watchlist checkbox state across pages and alphabet filters, stale discovery callback retirement, editable community names, always-public enforcement, owner authorization, and atomic bulk Watchlist rollback.
 
 Run the webhook application:
 
@@ -272,6 +278,7 @@ A valid HTTPS `WEBHOOK_BASE_URL` is required. The production deployment uses Rai
 
 ## Known Telegram constraints
 
+- Native topics in private bot chats require a current Bot API and BotFather **Threaded Mode**. Startup logs the state and `/health` exposes `threaded_mode_enabled`; General delivery remains available when it is disabled.
 - The standard Bot API cannot scan arbitrary old channel history.
 - Updates missed for too long must be imported with `/index` or through a future MTProto tool.
 - Channel-post deletion events are not generally available. If both source copying and Telegram file-ID fallback fail, the bot marks the file unavailable and alerts the owner.

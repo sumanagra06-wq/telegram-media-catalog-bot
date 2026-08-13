@@ -723,7 +723,7 @@ class UserRepository:
         return self.store.snapshot()
 
     async def migrate_schema(self) -> bool:
-        needs_migration = self.store.state.schema_version < 4 or any(
+        needs_migration = self.store.state.schema_version < 5 or any(
             not entry.id or key != entry.id
             for user in self.store.state.users.values()
             for key, entry in user.watchlist.items()
@@ -749,7 +749,7 @@ class UserRepository:
                     changed = True
                 if changed:
                     user.updated_at = utcnow_iso()
-            state.schema_version = 4
+            state.schema_version = 5
             return True
 
         return await self.store.mutate(mutate)
@@ -849,6 +849,23 @@ class UserRepository:
             if user is None:
                 raise ValueError("User not found")
             user.status = status
+            user.updated_at = utcnow_iso()
+            return user.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def set_delivery_topic(self, user_id: int, topic_id: int | None) -> UserProfile:
+        current = self.store.state.users.get(str(user_id))
+        if current is None:
+            raise ValueError("User not found")
+        if current.delivery_topic_id == topic_id:
+            return current.model_copy(deep=True)
+
+        def mutate(state: UsersState) -> UserProfile:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            user.delivery_topic_id = topic_id
             user.updated_at = utcnow_iso()
             return user.model_copy(deep=True)
 

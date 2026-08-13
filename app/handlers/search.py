@@ -5,11 +5,11 @@ import logging
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import StateFilter
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from ..config import Config
 from ..guards import access_denied_text, can_use_bot, ensure_registered
-from ..models import MediaType
+from ..models import FileRecord, MediaType
 from ..panels import PanelManager
 from ..repositories import CatalogRepository, UserRepository
 from ..services import CatalogQueryService, SearchSessionStore, delivery_caption
@@ -18,10 +18,8 @@ from ..ui import (
     content_screen,
     no_results,
     pack_screen,
-    post_delivery_dashboard,
     search_results,
     season_screen,
-    selectable_results,
     variants_screen,
 )
 from ..utils import safe_html
@@ -41,7 +39,34 @@ async def _active_callback(callback: CallbackQuery, users: UserRepository, confi
     return profile
 
 
-@router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
+async def _render_clean_search(
+    message: Message,
+    bot: Bot,
+    panels: PanelManager | None,
+    text: str,
+    markup: InlineKeyboardMarkup | None,
+) -> None:
+    if message.from_user is not None and panels is not None:
+        rendered = await panels.render_workspace(
+            user_id=message.from_user.id,
+            text=text,
+            reply_markup=markup,
+        )
+        if rendered is not None:
+            try:
+                await bot.delete_message(message.from_user.id, message.message_id)
+            except TelegramAPIError:
+                LOGGER.info("Could not auto-clean search query %s", message.message_id)
+            return
+    await message.answer(text, reply_markup=markup)
+
+
+@router.message(
+    StateFilter(None),
+    F.text,
+    ~F.text.startswith("/"),
+    ~F.is_topic_message,
+)
 async def plain_title_search(
     message: Message,
     bot: Bot,
@@ -51,7 +76,11 @@ async def plain_title_search(
     sessions: SearchSessionStore,
     panels: PanelManager | None = None,
 ) -> None:
-    if message.chat.type != "private" or message.from_user is None:
+    if (
+        message.chat.type != "private"
+        or message.from_user is None
+        or getattr(message, "message_thread_id", None) is not None
+    ):
         return
     profile, _ = await ensure_registered(message.from_user, users, config, bot)
     if not can_use_bot(profile, config):
@@ -59,54 +88,38 @@ async def plain_title_search(
         return
     raw_query = " ".join((message.text or "").split()).strip()
     if len(raw_query) < 2:
-        await message.answer(
+        await _render_clean_search(
+            message,
+            bot,
+            panels,
             "🔎 <b>SEARCH NEEDS A LITTLE MORE</b>\n"
-            "Please type at least two characters from the title."
+            "Please type at least two characters from the title.",
+            None,
         )
         return
     if len(raw_query) > 100:
-        await message.answer(
+        await _render_clean_search(
+            message,
+            bot,
+            panels,
             "✂️ <b>SEARCH IS TOO LONG</b>\n"
-            "Send only the movie or series title, optionally followed by its year."
+            "Send only the movie or series title, optionally followed by its year.",
+            None,
         )
         return
-    current_profile = users.get_user(message.from_user.id)
-    workspace_active = bool(
-        panels and current_profile and current_profile.panel_workspace_message_id is not None
-    )
     hits = query.search(raw_query)
     if not hits:
         text, markup = no_results(raw_query)
-        if panels and workspace_active:
-            rendered = await panels.render_existing_workspace(
-                user_id=message.from_user.id,
-                text=text,
-                reply_markup=markup,
-            )
-            if rendered:
-                return
-        await message.answer(text, reply_markup=markup)
+        await _render_clean_search(message, bot, panels, text, markup)
         return
     contents = [hit.content for hit in hits]
     session = sessions.create(
         message.from_user.id,
         raw_query,
         [item.id for item in contents],
-        selectable=workspace_active,
     )
-    if session.selectable:
-        text, markup = selectable_results(session, contents, 0)
-    else:
-        text, markup = search_results(session, contents, 0)
-    if panels and workspace_active:
-        rendered = await panels.render_existing_workspace(
-            user_id=message.from_user.id,
-            text=text,
-            reply_markup=markup,
-        )
-        if rendered:
-            return
-    await message.answer(text, reply_markup=markup)
+    text, markup = search_results(session, contents, 0)
+    await _render_clean_search(message, bot, panels, text, markup)
 
 
 @router.callback_query(F.data.startswith("sr:"))
@@ -130,10 +143,7 @@ async def search_page_callback(
         for content_id in session.content_ids
         if (content := catalog.get_content(content_id)) is not None
     ]
-    if session.selectable:
-        text, markup = selectable_results(session, contents, int(page_text))
-    else:
-        text, markup = search_results(session, contents, int(page_text))
+    text, markup = search_results(session, contents, int(page_text))
     await callback.answer()
     await edit_screen(callback, text, markup)
 
@@ -238,7 +248,7 @@ async def episode_callback(
         await callback.answer("This episode is unavailable.", show_alert=True)
         return
     if len(variants) == 1:
-        await callback.answer("Sending file…")
+        await callback.answer("Preparing secure delivery…")
         await _deliver_file(callback, variants[0].id, bot, catalog, config, panels)
         return
     text, markup = variants_screen(
@@ -277,22 +287,171 @@ async def pack_callback(
     await edit_screen(callback, text, markup)
 
 
-async def _post_delivery_controls(
+def _is_delivery_topic_error(exc: TelegramBadRequest) -> bool:
+    detail = str(exc).casefold()
+    return any(
+        marker in detail
+        for marker in (
+            "message thread not found",
+            "thread not found",
+            "topic_closed",
+            "topic closed",
+            "thread has been closed",
+            "message thread is closed",
+            "message thread closed",
+            "thread was deleted",
+            "topic was deleted",
+            "chat is not a forum",
+        )
+    )
+
+
+async def _ensure_delivery_target(
+    panels: PanelManager | None,
     user_id: int,
-    config: Config,
+    *,
+    replace: bool = False,
+) -> int | None:
+    if panels is None:
+        return None
+    try:
+        return await panels.ensure_delivery_topic(user_id, replace=replace)
+    except (StorageError, ValueError):
+        LOGGER.exception(
+            "Could not persist a delivery topic for user %s; using General",
+            user_id,
+        )
+        return None
+
+
+async def _copy_to_delivery_topic(
+    *,
+    bot: Bot,
+    panels: PanelManager | None,
+    user_id: int,
+    source_chat_id: int,
+    source_message_id: int,
+    caption: str,
+    protect_content: bool,
+) -> int | None:
+    topic_id = await _ensure_delivery_target(panels, user_id)
+
+    async def copy(target_topic_id: int | None) -> None:
+        await bot.copy_message(
+            chat_id=user_id,
+            from_chat_id=source_chat_id,
+            message_id=source_message_id,
+            message_thread_id=target_topic_id,
+            caption=caption,
+            parse_mode="HTML",
+            protect_content=protect_content,
+        )
+
+    try:
+        await copy(topic_id)
+        return topic_id
+    except TelegramBadRequest as exc:
+        if topic_id is None or not _is_delivery_topic_error(exc) or panels is None:
+            raise
+
+        if "closed" in str(exc).casefold() and await panels.reopen_delivery_topic(
+            user_id, topic_id
+        ):
+            try:
+                await copy(topic_id)
+                return topic_id
+            except TelegramBadRequest as reopened_exc:
+                if not _is_delivery_topic_error(reopened_exc):
+                    raise
+
+        replacement_id = await _ensure_delivery_target(panels, user_id, replace=True)
+        try:
+            await copy(replacement_id)
+            return replacement_id
+        except TelegramBadRequest as replacement_exc:
+            if replacement_id is None or not _is_delivery_topic_error(replacement_exc):
+                raise
+
+        # A topic can disappear between creation and copy. General is the final safe target.
+        await copy(None)
+        return None
+
+
+async def _send_file_id_with_delivery_fallback(
+    *,
+    bot: Bot,
+    panels: PanelManager | None,
+    user_id: int,
+    topic_id: int | None,
+    record: FileRecord,
+    caption: str,
+    protect_content: bool,
+) -> int | None:
+    async def send(target_topic_id: int | None) -> None:
+        if record.media_type == MediaType.VIDEO:
+            await bot.send_video(
+                chat_id=user_id,
+                video=record.telegram_file_id,
+                message_thread_id=target_topic_id,
+                caption=caption,
+                parse_mode="HTML",
+                protect_content=protect_content,
+            )
+        else:
+            await bot.send_document(
+                chat_id=user_id,
+                document=record.telegram_file_id,
+                message_thread_id=target_topic_id,
+                caption=caption,
+                parse_mode="HTML",
+                protect_content=protect_content,
+            )
+
+    try:
+        await send(topic_id)
+        return topic_id
+    except TelegramBadRequest as exc:
+        if topic_id is None or not _is_delivery_topic_error(exc) or panels is None:
+            raise
+
+        if "closed" in str(exc).casefold() and await panels.reopen_delivery_topic(
+            user_id, topic_id
+        ):
+            try:
+                await send(topic_id)
+                return topic_id
+            except TelegramBadRequest as reopened_exc:
+                if not _is_delivery_topic_error(reopened_exc):
+                    raise
+
+        replacement_id = await _ensure_delivery_target(panels, user_id, replace=True)
+        try:
+            await send(replacement_id)
+            return replacement_id
+        except TelegramBadRequest as replacement_exc:
+            if replacement_id is None or not _is_delivery_topic_error(replacement_exc):
+                raise
+
+        await send(None)
+        return None
+
+
+async def _clean_after_delivery(
+    callback: CallbackQuery,
+    bot: Bot,
     panels: PanelManager | None,
 ) -> None:
-    if panels is None:
+    if callback.message is None:
         return
-    text, markup = post_delivery_dashboard(config.is_owner(user_id))
+    message_id = getattr(callback.message, "message_id", None)
+    if message_id is None:
+        return
+    if panels and await panels.close_workspace(callback.from_user.id, message_id):
+        return
     try:
-        await panels.move_workspace_to_bottom(
-            user_id=user_id,
-            text=text,
-            reply_markup=markup,
-        )
-    except (TelegramAPIError, StorageError, ValueError):
-        LOGGER.warning("Could not move post-delivery controls for user %s", user_id, exc_info=True)
+        await bot.delete_message(callback.from_user.id, message_id)
+    except TelegramAPIError:
+        LOGGER.info("Could not auto-clean delivery source card %s", message_id)
 
 
 async def _deliver_file(
@@ -316,13 +475,15 @@ async def _deliver_file(
             "⚠️ <b>TITLE UNAVAILABLE</b>\nThis title is no longer in the delivery catalog."
         )
         return
+    delivery_topic_id: int | None = None
     try:
-        await bot.copy_message(
-            chat_id=callback.from_user.id,
-            from_chat_id=record.source_chat_id,
-            message_id=record.source_message_id,
+        delivery_topic_id = await _copy_to_delivery_topic(
+            bot=bot,
+            panels=panels,
+            user_id=callback.from_user.id,
+            source_chat_id=record.source_chat_id,
+            source_message_id=record.source_message_id,
             caption=delivery_caption(record, content.kind),
-            parse_mode="HTML",
             protect_content=config.protect_delivered_content,
         )
     except TelegramForbiddenError:
@@ -341,19 +502,23 @@ async def _deliver_file(
         # Telegram file IDs provide a server-side fallback without downloading or re-uploading
         # the media through Railway.
         try:
-            send_kwargs = {
-                "chat_id": callback.from_user.id,
-                "caption": delivery_caption(record, content.kind),
-                "parse_mode": "HTML",
-                "protect_content": config.protect_delivered_content,
-            }
-            if record.media_type == MediaType.VIDEO:
-                await bot.send_video(video=record.telegram_file_id, **send_kwargs)
-            else:
-                await bot.send_document(document=record.telegram_file_id, **send_kwargs)
-            await _post_delivery_controls(callback.from_user.id, config, panels)
+            if panels is not None:
+                delivery_topic_id = await _ensure_delivery_target(panels, callback.from_user.id)
+            await _send_file_id_with_delivery_fallback(
+                bot=bot,
+                panels=panels,
+                user_id=callback.from_user.id,
+                topic_id=delivery_topic_id,
+                record=record,
+                caption=delivery_caption(record, content.kind),
+                protect_content=config.protect_delivered_content,
+            )
+            await _clean_after_delivery(callback, bot, panels)
             return
-        except (TelegramBadRequest, TelegramForbiddenError):
+        except TelegramForbiddenError:
+            # A blocked bot cannot deliver to either a topic or General; the file remains valid.
+            return
+        except TelegramBadRequest:
             await catalog.mark_file_available(file_id, False)
             await callback.message.answer(
                 "❌ <b>FILE NO LONGER AVAILABLE</b>\n"
@@ -372,7 +537,7 @@ async def _deliver_file(
                 except (TelegramBadRequest, TelegramForbiddenError):
                     LOGGER.info("Could not notify owner %s about unavailable file", owner_id)
     else:
-        await _post_delivery_controls(callback.from_user.id, config, panels)
+        await _clean_after_delivery(callback, bot, panels)
 
 
 @router.callback_query(F.data.startswith("fl:"))
@@ -387,5 +552,5 @@ async def file_callback(
     if await _active_callback(callback, users, config) is None:
         return
     file_id = callback.data.split(":", 1)[1]
-    await callback.answer("Sending file…")
+    await callback.answer("Preparing secure delivery…")
     await _deliver_file(callback, file_id, bot, catalog, config, panels)

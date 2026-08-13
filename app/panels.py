@@ -56,6 +56,66 @@ class PanelManager:
         profile = self.users.get_user(user_id)
         return bool(profile and profile.panel_workspace_message_id == message_id)
 
+    async def ensure_delivery_topic(self, user_id: int, *, replace: bool = False) -> int | None:
+        """Return the user's permanent private-chat delivery topic, creating it once."""
+        async with self._user_lock(user_id):
+            profile = self.users.get_user(user_id)
+            if profile is None:
+                raise ValueError("User not found")
+            if profile.delivery_topic_id is not None and not replace:
+                return profile.delivery_topic_id
+            try:
+                bot_user = await self.bot.get_me()
+            except TelegramAPIError:
+                LOGGER.warning(
+                    "Could not check private-topic support; delivering to General for user %s",
+                    user_id,
+                    exc_info=True,
+                )
+                return None
+            if not bot_user.has_topics_enabled:
+                LOGGER.warning(
+                    "Private-chat topics are disabled for the bot; delivering to General for user %s",
+                    user_id,
+                )
+                return None
+            try:
+                topic = await self.bot.create_forum_topic(
+                    user_id,
+                    "📦 Deliveries",
+                    icon_color=7_322_096,
+                )
+            except TelegramAPIError:
+                LOGGER.warning(
+                    "Could not create delivery topic for user %s", user_id, exc_info=True
+                )
+                return None
+            try:
+                await self.users.set_delivery_topic(user_id, topic.message_thread_id)
+            except (StorageError, ValueError):
+                with suppress(TelegramAPIError):
+                    await self.bot.delete_forum_topic(user_id, topic.message_thread_id)
+                raise
+            try:
+                await self.bot.send_message(
+                    user_id,
+                    "📦 <b>DELIVERY INBOX</b>\n"
+                    "<blockquote>Protected files stay organized in this topic.</blockquote>\n"
+                    "Search and Watchlist controls remain in General. Delivered media is never "
+                    "removed by automatic chat cleanup.",
+                    message_thread_id=topic.message_thread_id,
+                )
+            except TelegramAPIError:
+                LOGGER.info("Could not post delivery-topic introduction for user %s", user_id)
+            return topic.message_thread_id
+
+    async def reopen_delivery_topic(self, user_id: int, topic_id: int) -> bool:
+        try:
+            await self.bot.reopen_forum_topic(user_id, topic_id)
+        except TelegramAPIError:
+            return False
+        return True
+
     async def ensure_dashboard(
         self,
         *,
@@ -312,50 +372,11 @@ class PanelManager:
                 expected_message_id=message_id,
             )
 
-    async def move_workspace_to_bottom(
-        self,
-        *,
-        user_id: int,
-        text: str,
-        reply_markup: InlineKeyboardMarkup,
-    ) -> int:
-        task = self._expiry_tasks.pop(user_id, None)
-        if task is not None:
-            task.cancel()
-        async with self._user_lock(user_id):
-            profile = self.users.get_user(user_id)
-            if profile is None:
-                raise ValueError("User not found")
-            previous_id = profile.panel_workspace_message_id
-            if previous_id is not None:
-                try:
-                    await self.bot.delete_message(user_id, previous_id)
-                except TelegramAPIError:
-                    try:
-                        await self.bot.edit_message_reply_markup(
-                            chat_id=user_id,
-                            message_id=previous_id,
-                            reply_markup=None,
-                        )
-                    except TelegramAPIError:
-                        LOGGER.info(
-                            "Could not disable superseded workspace %s for user %s",
-                            previous_id,
-                            user_id,
-                        )
-            message = await self.bot.send_message(user_id, text, reply_markup=reply_markup)
-            try:
-                await self.users.replace_panel_workspace_message(
-                    user_id,
-                    message.message_id,
-                    expected_previous_id=previous_id,
-                )
-            except (StorageError, ValueError):
-                with suppress(TelegramAPIError):
-                    await self.bot.delete_message(user_id, message.message_id)
-                raise
-            self.touch(user_id, message.message_id)
-            return message.message_id
+    async def close_current_workspace(self, user_id: int) -> bool:
+        profile = self.users.get_user(user_id)
+        if profile is None or profile.panel_workspace_message_id is None:
+            return False
+        return await self.close_workspace(user_id, profile.panel_workspace_message_id)
 
     async def cleanup_stale_workspaces(self) -> int:
         stale = [

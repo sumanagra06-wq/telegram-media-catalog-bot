@@ -115,6 +115,7 @@ async def test_plain_search_to_episode_delivery_flow():
             "chat_id": 42,
             "from_chat_id": -10010,
             "message_id": 55,
+            "message_thread_id": None,
             "caption": (
                 "📺 <b>Dark</b>\n"
                 "<blockquote>Series delivery • protected file</blockquote>\n"

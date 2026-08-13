@@ -12,18 +12,22 @@ This report records checks performed before packaging. It is not a claim that li
 - Search ranking, pagination and callback-size constraints
 - One persisted pinned dashboard plus one persisted/reused temporary workspace per user
 - Sliding five-minute workspace expiry, callback/message activity resets, restart cleanup, and concurrent-open serialization
-- Search/Browse/Recently Added checkbox emulation, cross-page selection, and atomic bulk Watchlist insertion
+- Delivery-only Search, Browse, Recently Added, and title/file screens with no Watchlist mutation controls
+- Safe retirement of historical Search/Browse/Recent bulk callbacks so old cards cannot mutate Watchlists
 - Alphabetical Watchlist-library browsing, in-category search, unsaved filtering, A–Z/# jumps, pagination, Select Page/Clear/review power tools, persistent ticks and atomic status insertion
 - Custom Watchlist batches of up to 25 normalized/deduplicated titles, preview ticks, one status, and one atomic commit
 - Always-public community Watchlists with editable, HTML-safe display names and visible usernames, including owner edit/reset moderation
 - Explicit status and dynamic-category labels on every own/shared Watchlist title card and detail screen
-- Post-delivery workspace replacement below protected media without leaving two active workspaces
+- Per-user persisted `📦 Deliveries` topic creation/reuse, closed-topic reopening, invalid-topic replacement, and General fallback
+- Protected movie, episode, document, and season-pack delivery routing without automatic deletion of delivered media
+- Typed-title query cleanup, delivery-topic message exclusion, and successful-workspace removal without a post-file dashboard
 - Unified owner dashboard with an authorization-checked Admin Control Center entry
 - Semantic Bot API button styles (`primary`, `success`, `danger`) with neutral secondary actions
 - Unicode-emoji labels and consistent HTML card hierarchy across user and owner screens
 - Absence of custom-emoji dependencies and preservation of existing callback contracts
 - Series episodes, variants and split season packs
-- Protected delivery, structured delivery captions and Telegram file-ID fallback
+- Protected delivery, structured delivery captions and topic-aware Telegram file-ID fallback
+- BotFather Threaded Mode startup visibility and health reporting while preserving runtime General fallback
 - Dashboard-final native command scope, emergency dashboard repost/rollback, hidden `/start` onboarding, and owner-only reply-based `/index` recovery
 - Private-chat and owner authorization filters
 - Caption metadata allowlisting and supplied real-world formats
@@ -58,18 +62,23 @@ This report records checks performed before packaging. It is not a claim that li
 22. Added owner moderation of another user's public Community display name from User Management, including edit, reset-to-Telegram-name, validation, escaped rendering and catalog audit events. Telegram profile fields and mandatory-public visibility remain unchanged.
 23. Declared the dashboard final: removed legacy user/admin command handlers and command-menu entries, retained hidden Telegram `/start` onboarding/deep links and owner reply-based `/index`, and exposed only `/dashboard`. The emergency action posts and pins a fresh dashboard, retires the old card, and rolls back safely if snapshot persistence fails.
 24. Reworked own and Community Watchlist title cards into a two-line identity: an explicit To Watch/On Hold/Completed status plus dynamic category label, followed by the title. Both own and read-only shared detail screens retain the same category/status fields, preventing movie, series and future categories from appearing ambiguous.
+25. Superseded findings 14 and 19 for non-Watchlist discovery: Search, Browse, Recently Added, and title/file screens are now delivery-only. Their checkbox/status UI and mutation handlers were removed; old `px:`, `pa:`, and `pw:` cards receive an expiry alert and cannot modify Watchlists. The full checkbox picker remains only inside Dashboard → Watchlist.
+26. Added users schema v5 with a persisted per-user delivery topic ID. The lifecycle creates one `📦 Deliveries` private-chat topic, reuses it, reopens a closed topic, creates a replacement for an invalid/deleted topic without deleting delivered history, and removes a newly created empty topic if snapshot persistence fails.
+27. Routed protected copy and Telegram file-ID fallback delivery through that topic, with a final General-chat target when Threaded Mode, topic setup, persistence, replacement, or topic delivery is unavailable. The fallback does not misclassify a user blocking the bot as catalog-file corruption.
+28. Typed searches now render into the one General workspace and promptly remove the input query after result/no-result/validation rendering. Topic messages are excluded. Successful delivery removes only the source workspace/card; delivered media is never tracked for cleanup and no dashboard is reposted beneath it.
+29. Added startup logging and `/health` visibility for BotFather Threaded Mode. Disabled mode is explicit but non-fatal because General delivery remains active.
 
 ## Automated results at package time
 
 - Ruff lint: passed
 - Ruff formatting check: passed
 - Python compileall: passed
-- Pytest with warnings treated as errors: passed (95 tests)
-- Test coverage: 64% overall; parser 98%, snapshot storage 84%, repositories 74%, services 87%, panel handlers 61%, Watchlist handlers 60%, delivery/search handlers 48%, panel lifecycle manager 66%, UI 77%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
+- Pytest with warnings treated as errors: passed (107 tests)
+- Test coverage: 64% overall; parser 98%, snapshot storage 84%, repositories 73%, services 87%, panel handlers 54%, Watchlist handlers 60%, delivery/search handlers 58%, panel lifecycle manager 68%, UI 76%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
 - Bandit: passed; the required Railway `0.0.0.0` bind is explicitly documented/suppressed
 - pip-audit: passed, no known vulnerabilities in production requirements
-- Mypy: core configuration, models, parser, storage, repositories, services, panel lifecycle, UI, presentation and command modules passed; the panel handler module also passed independently with imported handler modules skipped because Aiogram runtime narrowing is not represented statically
-- Command/callback audit: only hidden `/start`, visible `/dashboard`, and hidden owner `/index` command handlers remain; new callbacks are bounded to Telegram's 64-byte limit and legacy privacy callbacks remain safe for historical cards
+- Mypy: core configuration, models, parser, storage, repositories, services, panel lifecycle, UI, presentation and command modules passed; changed panel/search handlers and application startup also passed focused checks with imported handler modules skipped because Aiogram runtime narrowing is not represented statically
+- Command/callback audit: only hidden `/start`, visible `/dashboard`, and hidden owner `/index` command handlers remain; new callbacks are bounded to Telegram's 64-byte limit, legacy privacy callbacks remain safe, and historical discovery bulk callbacks are mutation-free expiry handlers
 - Representative rendering audit: custom batches at the 25-title/160-character boundary and the expanded picker passed Telegram text/button length, callback-size, HTML escaping, style-value and no-custom-emoji checks
 - Placeholder scan: no TODO/FIXME/XXX/HACK/NotImplemented markers
 - Secret and sensitive-file scans: clean
@@ -117,24 +126,30 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Concurrent workspace opens producing only one temporary message
 - Sliding inactivity expiry, manual activity reset and automatic deletion
 - Restart cleanup clearing only workspace references while preserving dashboards
-- Search queries editing the active workspace instead of creating a third result card
-- Selectable Search, Browse and Recently Added result rendering
-- Checkbox state across pages, callback-driven toggling and the 25-title bound
-- Bulk status selection and one-commit insertion/update behavior
-- Failed bulk snapshot commit rolling back every selected title atomically
+- Search queries editing the active workspace instead of creating a third result card, then deleting the typed query
+- Search validation screens cleaning the typed query and topic messages being excluded from plain search
+- Delivery-only Search, Browse, and Recently Added rendering with no checkbox/bulk callbacks
+- Historical discovery bulk callbacks producing an expiry alert without mutating Watchlists
+- Dedicated Watchlist-library checkbox state across pages, callback-driven toggling and the 25-title bound
+- Watchlist-library bulk status selection and one-commit insertion/update behavior
+- Failed Watchlist bulk snapshot commit rolling back every selected title atomically
 - Non-owner rejection at the Admin Control Center handler even when a valid dashboard message is supplied
 - Legacy dashboard callback contracts continuing alongside the new panel routes, except the intentionally removed privacy button; its callback handler remains safe for old cards
 - Watchlist-library pagination, alphabetical ordering, A–Z/# picker contents and direct filtering
 - In-category search, unsaved-only filtering, Select Page, Clear Selection and selected-only review
 - Tick selection surviving filter changes and bulk status insertion from the dedicated Watchlist add flow
 - Community display-name editing, length validation, HTML escaping and username retention
-- Schema-v4 conversion of previously private Watchlists to always-public state
-- Successful media delivery replacing the old workspace with one new dashboard below the file while preserving the pinned dashboard
+- Schema-v5 migration preserving schema-v4 always-public Watchlists while initializing delivery-topic state
+- Delivery-topic create/persist/reuse, deleted-topic replacement, closed-topic reopen, and rollback deletion of a newly created empty topic
+- General fallback for disabled Threaded Mode, failed topic persistence, and a topic disappearing again during replacement
+- Topic-aware Telegram document file-ID fallback when source copying is unavailable
+- Successful media delivery removing only the source workspace/card while preserving both the pinned dashboard and delivered media
 - Dashboard-only command registration, emergency repost retirement of the old pinned card, and failed-snapshot rollback without losing the previous dashboard reference
 
 ## Honest remaining limits
 
-- A real end-to-end Telegram and Railway smoke test still requires the owner's bot token, owner ID, private channel IDs and Railway domain. Those secrets were not available during this audit.
+- Automated tests use fakes and do not create a real private-chat topic. After deployment, production `/health` and startup logs can verify BotFather Threaded Mode, while a final user-requested file is the definitive Telegram client smoke test. No credentials are copied into source or chat.
+- Private-chat topics require BotFather Threaded Mode. If production reports it disabled, the application safely delivers in General until the owner enables it; application code cannot change that BotFather setting.
 - Telegram-only persistence is appropriate for the stated 40–50-user scale, not high-write public scale.
 - The five-minute timers are intentionally in-process. Workspace message IDs are persisted, and every restart attempts to delete or disable those stale cards before clearing their references rather than trying to resume uncertain pre-restart deadlines.
 - Dashboard pinning is attempted through the Bot API. Hidden `/start` recovers onboarding/deep-link dashboards, while `/dashboard` deliberately reposts the emergency replacement; if Telegram denies replacement pinning, an existing tracked dashboard is preserved.

@@ -111,10 +111,11 @@ def panel_dashboard(
             f"👋 <b>Welcome{greeting}</b>\n\n"
             f"{DIVIDER}\n"
             "🔎 Search instantly or browse the complete catalog.\n"
-            "☑️ Select several titles and save them together.\n"
+            "📦 Protected files arrive in your dedicated Deliveries topic.\n"
+            "📚 Watchlist additions stay inside the Watchlist panel.\n"
             "⏱ Your temporary workspace closes after 5 quiet minutes.\n"
             f"{DIVIDER}\n"
-            "💡 Send a title directly in chat whenever you prefer."
+            "💡 Send a title directly in General whenever you prefer."
         ),
         builder.as_markup(),
     )
@@ -154,40 +155,6 @@ def panel_workspace_home(is_owner: bool) -> tuple[str, InlineKeyboardMarkup]:
     )
 
 
-def post_delivery_dashboard(is_owner: bool) -> tuple[str, InlineKeyboardMarkup]:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="🔎 Search", callback_data="p:search", style="primary"),
-        InlineKeyboardButton(text="🗂 Browse", callback_data="p:browse", style="primary"),
-    )
-    builder.row(
-        InlineKeyboardButton(text="✨ Recently added", callback_data="p:recent"),
-        InlineKeyboardButton(text="📚 Watchlist", callback_data="p:watchlist", style="primary"),
-    )
-    if is_owner:
-        builder.row(
-            InlineKeyboardButton(
-                text="🛡 Admin Control Center",
-                callback_data="p:admin",
-                style="primary",
-            )
-        )
-    builder.row(
-        InlineKeyboardButton(text="❓ Help", callback_data="p:help"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="p:close"),
-    )
-    return (
-        (
-            "✨ <b>MEDIA LIBRARY DASHBOARD</b>\n"
-            "<blockquote>Your file is above • what would you like next?</blockquote>\n"
-            f"{DIVIDER}\n"
-            "The controls were moved below the delivered file so you do not need to scroll back.\n\n"
-            "⏱ This temporary dashboard closes after 5 quiet minutes."
-        ),
-        builder.as_markup(),
-    )
-
-
 def panel_browse_categories(categories: list[Category]) -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
     icons = {"single": "🎬", "episodic": "📺", "mixed": "🗂"}
@@ -204,129 +171,15 @@ def panel_browse_categories(categories: list[Category]) -> tuple[str, InlineKeyb
         InlineKeyboardButton(text="✖️ Close", callback_data="p:close"),
     )
     text = (
-        "🗂 <b>BROWSE & MULTI-SELECT</b>\n"
-        "<blockquote>Explore a collection, then tick one or more titles.</blockquote>\n"
+        "🗂 <b>BROWSE FOR FILES</b>\n"
+        "<blockquote>Delivery-only catalog browsing.</blockquote>\n"
         f"{DIVIDER}\n"
         f"📚 Available collections: <b>{len(categories)}</b>\n\n"
-        "Choose a collection:"
+        "Choose a collection to find a movie or series. Use Watchlist to save titles."
     )
     if not categories:
         text += "\n\n🫙 <i>No collections are available yet.</i>"
     return text, builder.as_markup()
-
-
-def selectable_results(
-    session: SearchSession,
-    contents: list[ContentRecord],
-    page: int,
-    page_size: int = 4,
-) -> tuple[str, InlineKeyboardMarkup]:
-    visible, page, pages = page_slice(contents, page, page_size)
-    selected = session.selected_content_ids
-    builder = InlineKeyboardBuilder()
-    for rank, content in enumerate(visible, start=page * page_size + 1):
-        checked = content.id in selected
-        builder.row(
-            InlineKeyboardButton(
-                text="✅" if checked else "☐",
-                callback_data=f"px:{session.token}:{content.id}:{page}",
-                style="success" if checked else None,
-            ),
-            InlineKeyboardButton(
-                text=compact_label(
-                    f"{rank}. {'📺' if content.kind == ContentKind.SERIES else '🎬'} "
-                    f"{content.title} ({content.year or 'Unknown'})",
-                    52,
-                ),
-                callback_data=f"ct:{content.id}:{session.token}:{page}",
-                style="primary",
-            ),
-        )
-    navigation: list[InlineKeyboardButton] = []
-    if page > 0:
-        navigation.append(
-            InlineKeyboardButton(text="◀️ Previous", callback_data=f"sr:{session.token}:{page - 1}")
-        )
-    if page + 1 < pages:
-        navigation.append(
-            InlineKeyboardButton(text="Next ▶️", callback_data=f"sr:{session.token}:{page + 1}")
-        )
-    if navigation:
-        builder.row(*navigation)
-    builder.row(
-        InlineKeyboardButton(
-            text=f"➕ Add Selected · {len(selected)}",
-            callback_data=f"pa:{session.token}:{page}",
-            style="success" if selected else None,
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(text="◀️ Workspace", callback_data="p:home"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="p:close"),
-    )
-    heading = session.result_heading
-    if session.query == "Recently added":
-        heading = "RECENTLY ADDED"
-    return (
-        (
-            f"☑️ <b>{safe_html(heading)}</b>\n"
-            f"<blockquote>Results for “{safe_html(session.query)}”</blockquote>\n"
-            f"{DIVIDER}\n"
-            f"🎯 Found: <b>{len(contents)}</b>  •  Selected: <b>{len(selected)}/25</b>\n"
-            f"{_page_line(page, pages)}\n\n"
-            "Tap ☐ to select titles, or tap a title to view and download it. "
-            "Selections stay checked across pages."
-        ),
-        builder.as_markup(),
-    )
-
-
-def bulk_watchlist_status_picker(
-    session: SearchSession,
-    page: int,
-) -> tuple[str, InlineKeyboardMarkup]:
-    count = len(session.selected_content_ids)
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text="📌 To watch",
-            callback_data=f"pw:{session.token}:t:{page}",
-            style="primary",
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text="⏸ On hold",
-            callback_data=f"pw:{session.token}:h:{page}",
-            style="primary",
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text="✅ Completed",
-            callback_data=f"pw:{session.token}:c:{page}",
-            style="success",
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text="◀️ Back to selection",
-            callback_data=f"sr:{session.token}:{page}",
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="p:close"),
-    )
-    return (
-        (
-            "📚 <b>ADD SELECTED TITLES</b>\n"
-            f"<blockquote>{count} title{'s' if count != 1 else ''} selected</blockquote>\n"
-            f"{DIVIDER}\n"
-            "Choose one Watchlist status for the whole selection:\n\n"
-            "📌 <b>To watch</b>  •  saved for later\n"
-            "⏸ <b>On hold</b>  •  paused for now\n"
-            "✅ <b>Completed</b>  •  already finished"
-        ),
-        builder.as_markup(),
-    )
 
 
 def browse_categories(categories: list[Category]) -> tuple[str, InlineKeyboardMarkup]:

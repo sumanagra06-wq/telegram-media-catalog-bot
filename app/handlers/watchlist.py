@@ -379,7 +379,6 @@ async def watchlist_library_category_selected(
         callback.from_user.id,
         category.name,
         [content.id for content in contents],
-        selectable=True,
         result_heading="WATCHLIST LIBRARY",
         context="watchlist_library",
     )

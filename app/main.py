@@ -97,6 +97,7 @@ def create_application(config: Config) -> web.Application:
     query = CatalogQueryService(catalog)
     sessions = SearchSessionStore()
     panels = PanelManager(bot, users)
+    runtime_status: dict[str, bool | None] = {"threaded_mode_enabled": None}
 
     dispatcher.callback_query.outer_middleware(PanelActivityMiddleware())
     dispatcher.message.outer_middleware(PanelActivityMiddleware())
@@ -142,6 +143,15 @@ def create_application(config: Config) -> web.Application:
             drop_pending_updates=False,
         )
         identity = await bot.get_me()
+        threaded_mode_enabled = bool(identity.has_topics_enabled)
+        runtime_status["threaded_mode_enabled"] = threaded_mode_enabled
+        if threaded_mode_enabled:
+            LOGGER.info("BotFather Threaded Mode is enabled; delivery topics are available")
+        else:
+            LOGGER.warning(
+                "BotFather Threaded Mode is DISABLED; protected files will use the General "
+                "fallback until it is enabled in BotFather"
+            )
         LOGGER.info(
             "Started @%s with catalog r%s and users r%s",
             identity.username,
@@ -163,6 +173,7 @@ def create_application(config: Config) -> web.Application:
                 "status": "ok",
                 "catalog_revision": catalog.snapshot().revision,
                 "users_revision": users.snapshot().revision,
+                "threaded_mode_enabled": runtime_status["threaded_mode_enabled"],
             }
             return web.json_response(data)
         except StorageError:
