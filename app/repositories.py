@@ -1071,6 +1071,75 @@ class UserRepository:
 
         return await self.store.mutate(mutate)
 
+    async def bulk_upsert_manual_watchlist(
+        self,
+        *,
+        user_id: int,
+        titles: Iterable[str],
+        category_id: str,
+        category_name: str,
+        status: WatchStatus,
+    ) -> BulkWatchlistResult:
+        cleaned: list[str] = []
+        normalized_seen: set[str] = set()
+        for raw_title in titles:
+            title = " ".join(raw_title.split()).strip()
+            if not title:
+                continue
+            if len(title) > 160:
+                raise ValueError("Every title must be 160 characters or fewer")
+            normalized = normalize_title(title)
+            if not normalized or normalized in normalized_seen:
+                continue
+            normalized_seen.add(normalized)
+            cleaned.append(title)
+        if not cleaned:
+            raise ValueError("Add at least one custom title")
+        if len(cleaned) > 25:
+            raise ValueError("Add no more than 25 custom titles at once")
+
+        def mutate(state: UsersState) -> BulkWatchlistResult:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            entries: list[WatchlistEntry] = []
+            created_count = 0
+            for title in cleaned:
+                normalized = normalize_title(title)
+                existing = next(
+                    (
+                        entry
+                        for entry in user.watchlist.values()
+                        if entry.category_id == category_id
+                        and normalize_title(entry.title) == normalized
+                    ),
+                    None,
+                )
+                if existing is None:
+                    created_count += 1
+                entry_id = existing.id if existing else make_id("w")
+                entry = WatchlistEntry(
+                    id=entry_id,
+                    content_id=existing.content_id if existing else None,
+                    title=title,
+                    year=existing.year if existing else None,
+                    category_id=category_id,
+                    category_name=category_name,
+                    status=status,
+                    added_at=existing.added_at if existing else utcnow_iso(),
+                    updated_at=utcnow_iso(),
+                )
+                user.watchlist[entry_id] = entry
+                entries.append(entry.model_copy(deep=True))
+            user.updated_at = utcnow_iso()
+            return BulkWatchlistResult(
+                entries=tuple(entries),
+                created=created_count,
+                updated=len(entries) - created_count,
+            )
+
+        return await self.store.mutate(mutate)
+
     def get_watchlist_entry(self, user_id: int, entry_id: str) -> WatchlistEntry | None:
         user = self.store.state.users.get(str(user_id))
         entry = user.watchlist.get(entry_id) if user else None

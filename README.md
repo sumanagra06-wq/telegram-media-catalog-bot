@@ -26,7 +26,7 @@ A private-channel media catalog for movies and series. Telegram stores both the 
 - Owner-only, double-confirmed catalog-title removal that deletes every file record, attempts source-post deletion, and tracks required manual cleanup
 - Removed source tombstones prevent edited posts from silently re-indexing; failed Telegram deletions remain retryable
 - Public access initially; owner can switch to approval or allowlist
-- Native scoped command menus plus the unchanged legacy inline interaction layer
+- Dashboard-final interaction model with one emergency `/dashboard` repost command; `/start` remains hidden for Telegram onboarding/deep links and reply-based `/index` is owner-only recovery
 - One recoverable pinned dashboard per user and one in-place temporary workspace below it
 - Sliding five-minute workspace expiry with activity resets and restart cleanup
 - Checkbox-style multi-selection across Search, Browse, and Recently Added, with atomic bulk Watchlist insertion
@@ -44,7 +44,7 @@ A private-channel media catalog for movies and series. Telegram stores both the 
 Private category channels
 ├── Movies
 ├── Series
-└── Categories added later with /category_add
+└── Categories added later from Admin Control Center → Categories
 
 Private File Database channel
 ├── One pinned TDB_MANIFEST_V1 control message
@@ -117,27 +117,16 @@ PROTECT_DELIVERED_CONTENT=true
 6. Wait for `/health` to report `status: ok`.
 7. Open the bot privately and send `/start`.
 8. Add the bot as administrator to the Movies storage channel.
-9. Register it:
+9. Open Dashboard → Admin Control Center → Categories → Add category, then submit `Movies` and its private channel ID.
+10. Repeat for `Series` and its private channel ID.
 
-   ```text
-   /category_add Movies | -1003333333333
-   ```
-
-10. Register Series:
-
-    ```text
-    /category_add Series | -1004444444444
-    ```
-
-The bot infers `Movies` as single-title and `Series` as episodic. Unknown category names default to mixed and can be changed through Admin Panel → Categories → Change mode.
+The bot infers `Movies` as single-title and `Series` as episodic. Unknown category names default to mixed and can be changed through Admin Control Center → Categories → Change mode.
 
 Only begin bulk uploads after the category registration is committed.
 
 ## Adding future categories
 
-```text
-/category_add Anime | -1005555555555
-```
+Use Dashboard → Admin Control Center → Categories → Add category. Send the category name and private channel ID when prompted.
 
 The bot verifies privacy/admin access, generates the category ID and slug, writes a catalog revision, and immediately updates browse, search, watchlists, statistics, and channel routing. No restart is needed.
 
@@ -195,37 +184,33 @@ Dark
 
 The bot sends ranked title buttons. Selecting a series opens seasons and then available episodes. One episode variant is delivered immediately; multiple variants display language/quality buttons. Movies show a Get File button or version buttons.
 
-`/start` creates or recovers one dashboard message and asks Telegram to pin it in the private chat. Dashboard buttons create or reuse one temporary workspace message below it. Navigation edits that same workspace instead of adding another menu card. Every callback or user-message interaction resets a five-minute inactivity timer; after five quiet minutes the workspace is deleted. A restart removes or disables stale workspace cards while preserving the pinned dashboard reference.
+Telegram onboarding through `/start` creates or recovers one dashboard message and asks Telegram to pin it in the private chat. Dashboard buttons create or reuse one temporary workspace message below it. Navigation edits that same workspace instead of adding another menu card. Every callback or user-message interaction resets a five-minute inactivity timer; after five quiet minutes the workspace is deleted. A restart removes or disables stale workspace cards while preserving the pinned dashboard reference. If the dashboard is lost or buried, `/dashboard` posts and pins a fresh replacement, then retires the old dashboard card.
 
 Search, Browse, and Recently Added results show a separate `☐`/`✅` toggle beside each title. Selections remain checked across result pages. Users can select up to 25 titles, choose **Add Selected**, then assign To Watch, On Hold, or Completed to the whole selection in one atomic database update. The adjacent title button still opens normal details and protected delivery.
 
-Watchlist → Add a title → Choose from the library now opens each dynamic collection as a complete alphabetical catalog. Titles are paginated, both the checkbox and adjacent title button toggle selection, an alphabet picker jumps directly to A–Z or `#`, and selections survive page/alphabet changes. A `📚` marker identifies titles already saved before a bulk status update.
+Watchlist → Add a title → Choose from the library opens each dynamic collection as a complete alphabetical catalog. Titles are paginated, both the checkbox and adjacent title button toggle selection, and selections survive page/filter changes. Power tools provide in-category title search, unsaved-only filtering, A–Z/`#` jumping, Select Page, Clear Selection, and selected-only review. A `📚` marker identifies titles already saved before a bulk status update.
 
 After any successful movie, episode, variant, or season-pack delivery, the old temporary workspace is removed and a fresh dashboard card is posted below the delivered file. This keeps the controls at the bottom of the chat without creating two active workspaces.
 
-The owner's pinned card is the same user dashboard with one additional Admin Control Center entry. Owner authorization is still enforced by the handler, not merely by hiding the button. Existing commands and legacy callbacks remain operational during the new-panel test period.
+The owner's pinned card is the same user dashboard with one additional Admin Control Center entry. Owner authorization is still enforced by the handler, not merely by hiding the button. The dashboard is the final user-facing interaction system; old native user and admin commands are no longer registered or handled.
 
-User native commands are intentionally short:
+The native command menu contains only the emergency recovery command:
 
 ```text
-/start
-/menu
-/watchlist
-/help
-/cancel
+/dashboard
 ```
 
-The owner receives additional scoped commands for administration.
+Telegram's standard `/start` entry and content deep links remain supported but are hidden from the command menu. Reply-based owner `/index` also remains hidden as an operational exception for missed storage posts.
 
 ## Watchlist panel and sharing
 
-Open `/watchlist` or Main Menu → My watchlist. The panel supports:
+Open Dashboard → Watchlist. The panel supports:
 
-1. **From catalog** — choose any enabled dynamic category, browse every indexed title alphabetically, jump by initial, tick one or more titles across pages, and assign one status to the selection.
-2. **Manual title** — choose a dynamic category, type any title up to 160 characters, and choose one of the same three statuses.
+1. **From catalog** — choose any enabled dynamic category; search/filter or browse alphabetically; jump by initial; select a page, clear, or review ticks; and assign one status to up to 25 selected titles.
+2. **Custom batch** — choose a dynamic category, paste up to 25 titles (one per line, 160 characters each), review/tick the normalized deduplicated preview, and choose one status for one atomic commit.
 3. **My titles** — view entries, change status, remove an entry, or open its catalog page when one is linked and still available.
 4. **Community lists** — browse other active users' Watchlists read-only. Shared viewers cannot change or remove another user's entries.
-5. **Community name** — choose a display name up to 40 characters without changing the Telegram profile; the real `@username` remains visible in the directory when available.
+5. **Community name** — choose a display name up to 40 characters without changing the Telegram profile; the real `@username` remains visible in the directory when available. Owners can edit or reset any user's Community name from Admin Control Center → Users.
 
 Community Watchlists are always public to other active bot users and cannot be made private. The previous privacy callback remains safely handled for old cards but rejects private-mode requests. A catalog title removed by the owner remains as a text-only Watchlist entry; catalog removal does not edit personal Watchlists.
 

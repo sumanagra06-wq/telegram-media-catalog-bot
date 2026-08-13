@@ -42,14 +42,6 @@ async def edit_screen(callback: CallbackQuery, text: str, reply_markup) -> None:
                 raise
 
 
-async def show_home_message(message: Message, config: Config) -> None:
-    text, markup = main_dashboard(
-        config.is_owner(message.from_user.id if message.from_user else None),
-        message.from_user.first_name if message.from_user else None,
-    )
-    await message.answer(text, reply_markup=markup)
-
-
 async def show_home_callback(
     callback: CallbackQuery,
     config: Config,
@@ -120,53 +112,33 @@ async def start_command(
                 return
 
 
-@router.message(Command("menu"))
-async def menu_command(message: Message, bot: Bot, config: Config, users: UserRepository) -> None:
-    if message.chat.type != "private" or message.from_user is None:
+@router.message(Command("dashboard"))
+async def dashboard_command(
+    message: Message,
+    bot: Bot,
+    config: Config,
+    users: UserRepository,
+    panels: PanelManager,
+    state: FSMContext,
+) -> None:
+    if message.from_user is None:
         return
     profile, _ = await ensure_registered(message.from_user, users, config, bot)
+    if config.is_owner(message.from_user.id):
+        await register_owner_commands(bot, message.from_user.id)
     if not can_use_bot(profile, config):
         await message.answer(access_denied_text(profile))
         return
-    await show_home_message(message, config)
-
-
-@router.message(Command("help"))
-async def help_command(message: Message) -> None:
-    await message.answer(
-        "❓ <b>HELP & QUICK GUIDE</b>\n"
-        "<blockquote>Everything you need to find and save a title.</blockquote>\n"
-        f"{DIVIDER}\n"
-        "<b>1.</b> 🔎 Send a movie or series title\n"
-        "<b>2.</b> 🎯 Choose the best matching result\n"
-        "<b>3.</b> 📺 Pick a season and episode when needed\n"
-        "<b>4.</b> ▶️ Select a version to receive the protected file\n\n"
-        "📚 <b>Watchlists</b>\n"
-        "Use /watchlist to save catalog or custom titles and explore public community lists.\n\n"
-        "💡 <b>Search tip:</b> Add a year to narrow results, for example "
-        "<code>Dune 2021</code>.",
-        reply_markup=home_button_markup(),
-    )
-
-
-@router.message(Command("cancel"))
-async def cancel_command(
-    message: Message,
-    state: FSMContext,
-    config: Config,
-    panels: PanelManager | None = None,
-) -> None:
     await state.clear()
-    await message.answer("↩️ <b>Action cancelled</b>\nNo changes were made.")
-    if message.from_user and panels:
-        text, markup = panel_workspace_home(config.is_owner(message.from_user.id))
-        if await panels.render_existing_workspace(
-            user_id=message.from_user.id,
-            text=text,
-            reply_markup=markup,
-        ):
-            return
-    await show_home_message(message, config)
+    text, markup = panel_dashboard(
+        config.is_owner(message.from_user.id),
+        message.from_user.first_name,
+    )
+    await panels.repost_dashboard(
+        user_id=message.from_user.id,
+        text=text,
+        reply_markup=markup,
+    )
 
 
 @router.callback_query(F.data == "menu:home")

@@ -30,6 +30,7 @@ class FakePanelBot:
         self.sent = []
         self.edited = []
         self.pinned = []
+        self.unpinned = []
         self.deleted = []
         self.copied = []
         self.events = []
@@ -64,6 +65,10 @@ class FakePanelBot:
 
     async def pin_chat_message(self, chat_id, message_id, **kwargs):
         self.pinned.append((chat_id, message_id, kwargs))
+        return True
+
+    async def unpin_chat_message(self, chat_id, message_id):
+        self.unpinned.append((chat_id, message_id))
         return True
 
     async def delete_message(self, chat_id, message_id):
@@ -165,6 +170,47 @@ async def test_pinned_dashboard_is_persisted_reused_and_recovered():
     assert recovered_id == 101
     assert users.get_user(42).panel_dashboard_message_id == 101
     assert (42, 100) in bot.deleted
+
+
+async def test_emergency_dashboard_repost_retires_the_previous_pinned_card():
+    _, users = await _repositories()
+    await _register(users)
+    await users.set_panel_dashboard_message(42, 77)
+    bot = FakePanelBot()
+    panels = PanelManager(bot, users)
+    text, markup = panel_dashboard(False, "Alice")
+
+    replacement_id = await panels.repost_dashboard(
+        user_id=42,
+        text=text,
+        reply_markup=markup,
+    )
+
+    assert replacement_id == 100
+    assert users.get_user(42).panel_dashboard_message_id == 100
+    assert bot.pinned == [(42, 100, {"disable_notification": True})]
+    assert bot.unpinned == [(42, 77)]
+    assert bot.deleted == [(42, 77)]
+
+
+async def test_emergency_dashboard_repost_rolls_back_when_snapshot_commit_fails():
+    _, users = await _repositories()
+    await _register(users)
+    await users.set_panel_dashboard_message(42, 77)
+    backend = users.store.backend
+    assert isinstance(backend, MemorySnapshotBackend)
+    backend.fail_next_commit = True
+    bot = FakePanelBot()
+    panels = PanelManager(bot, users)
+    text, markup = panel_dashboard(False, "Alice")
+
+    with pytest.raises(StorageError):
+        await panels.repost_dashboard(user_id=42, text=text, reply_markup=markup)
+
+    assert users.get_user(42).panel_dashboard_message_id == 77
+    assert bot.unpinned == [(42, 100)]
+    assert bot.deleted == [(42, 100)]
+    assert (42, 77) not in bot.deleted
 
 
 async def test_workspace_reuses_one_message_and_sliding_expiry_deletes_it():
@@ -510,6 +556,51 @@ async def test_bulk_watchlist_insert_is_atomic_and_updates_existing_entries():
     assert second.created == 0 and second.updated == 2
     assert len(profile.watchlist) == 2
     assert {entry.status for entry in profile.watchlist.values()} == {WatchStatus.COMPLETED}
+
+
+async def test_manual_watchlist_batch_is_deduplicated_atomic_and_updates_existing():
+    _, users = await _repositories()
+    await _register(users)
+    first = await users.bulk_upsert_manual_watchlist(
+        user_id=42,
+        titles=["Arrival", " Dune ", "arrival", ""],
+        category_id="cat_movies",
+        category_name="Movies",
+        status=WatchStatus.TO_WATCH,
+    )
+    second = await users.bulk_upsert_manual_watchlist(
+        user_id=42,
+        titles=["Arrival", "Dune"],
+        category_id="cat_movies",
+        category_name="Movies",
+        status=WatchStatus.COMPLETED,
+    )
+    backend = users.store.backend
+    assert isinstance(backend, MemorySnapshotBackend)
+    backend.fail_next_commit = True
+    with pytest.raises(StorageError):
+        await users.bulk_upsert_manual_watchlist(
+            user_id=42,
+            titles=["Arrival", "Dune", "Heat"],
+            category_id="cat_movies",
+            category_name="Movies",
+            status=WatchStatus.ON_HOLD,
+        )
+
+    profile = users.get_user(42)
+    assert first.created == 2 and first.updated == 0
+    assert second.created == 0 and second.updated == 2
+    assert {entry.title for entry in profile.watchlist.values()} == {"Arrival", "Dune"}
+    assert {entry.status for entry in profile.watchlist.values()} == {WatchStatus.COMPLETED}
+    with pytest.raises(ValueError, match="25"):
+        await users.bulk_upsert_manual_watchlist(
+            user_id=42,
+            titles=[f"Title {index}" for index in range(26)],
+            category_id="cat_movies",
+            category_name="Movies",
+            status=WatchStatus.TO_WATCH,
+        )
+    assert len(users.get_user(42).watchlist) == 2
 
 
 async def test_plain_search_edits_active_workspace_instead_of_creating_result_card():

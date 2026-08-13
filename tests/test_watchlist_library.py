@@ -10,8 +10,14 @@ from app.handlers.watchlist import (
     watchlist_library_alphabet,
     watchlist_library_alphabet_selected,
     watchlist_library_category_selected,
+    watchlist_library_clear_selected,
+    watchlist_library_review_toggle,
+    watchlist_library_search_input,
+    watchlist_library_search_start,
+    watchlist_library_select_page,
     watchlist_library_status_selected,
     watchlist_library_toggle,
+    watchlist_library_unsaved_toggle,
     watchlist_visibility,
 )
 from app.metadata import parse_metadata
@@ -25,9 +31,22 @@ from app.ui import public_watchlist_directory
 class FakeState:
     def __init__(self):
         self.cleared = False
+        self.value = None
+        self.data = {}
+
+    async def set_state(self, value):
+        self.value = value
+
+    async def update_data(self, **kwargs):
+        self.data.update(kwargs)
+
+    async def get_data(self):
+        return dict(self.data)
 
     async def clear(self):
         self.cleared = True
+        self.value = None
+        self.data = {}
 
 
 class FakeScreen:
@@ -264,6 +283,121 @@ async def test_watchlist_library_supports_pages_alphabet_ticks_and_bulk_status()
     assert {entry.title for entry in profile.watchlist.values()} == {"Arrival", "Blade"}
     assert {entry.status for entry in profile.watchlist.values()} == {WatchStatus.ON_HOLD}
     assert "MY WATCHLIST" in choose_status.message.edits[-1][0]
+
+
+async def test_watchlist_library_power_tools_search_filter_select_review_and_clear():
+    catalog, users = await _repositories()
+    user = _user(42, "Alice")
+    await _register(users, user)
+    category = await catalog.add_category("Movies", -10010, "Movies")
+    contents = []
+    for index, title in enumerate(
+        ("Arrival", "Batman", "Blade", "Dune", "Heat", "Jaws", "Moon", "Up"),
+        start=1,
+    ):
+        _, content, _ = await catalog.upsert_file(
+            category_id=category.id,
+            source_chat_id=-10010,
+            source_message_id=index,
+            telegram_file_id=f"file-power-{index}",
+            telegram_file_unique_id=f"unique-power-{index}",
+            media_type=MediaType.VIDEO,
+            metadata=parse_metadata(f"{title} 2020 1080p English mkv"),
+        )
+        contents.append(content)
+    await users.upsert_watchlist_entry(
+        user_id=user.id,
+        content_id=contents[0].id,
+        title=contents[0].title,
+        year=contents[0].year,
+        category_id=category.id,
+        category_name=category.name,
+        status=WatchStatus.TO_WATCH,
+    )
+    sessions = SearchSessionStore()
+    choose_category = FakeCallback(user, f"wlbc:{category.id}")
+    await watchlist_library_category_selected(
+        choose_category,
+        users,
+        catalog,
+        CatalogQueryService(catalog),
+        sessions,
+        _config(),
+    )
+    token = next(
+        button.callback_data.split(":", 2)[1]
+        for button in _buttons(choose_category.message.edits[-1][1]["reply_markup"])
+        if button.callback_data.startswith("wlbt:")
+    )
+    state = FakeState()
+    search_start = FakeCallback(user, f"wlfq:{token}:0")
+    await watchlist_library_search_start(
+        search_start,
+        users,
+        sessions,
+        _config(),
+        state,
+    )
+    assert "SEARCH THIS COLLECTION" in search_start.message.edits[-1][0]
+    search_message = FakeMessage(user, "bat")
+    await watchlist_library_search_input(
+        search_message,
+        users,
+        catalog,
+        sessions,
+        state,
+    )
+    search_text, search_kwargs = search_message.answers[-1]
+    assert "Search: <b>bat</b>" in search_text
+    search_labels = [button.text for button in _buttons(search_kwargs["reply_markup"])]
+    assert any("Batman" in label for label in search_labels)
+    assert not any("Blade" in label for label in search_labels)
+
+    session = sessions.get(token, user.id)
+    session.text_filter = None
+    unsaved = FakeCallback(user, f"wluo:{token}:0")
+    await watchlist_library_unsaved_toggle(
+        unsaved,
+        users,
+        catalog,
+        sessions,
+        _config(),
+    )
+    assert "Matching titles: <b>7</b>" in unsaved.message.edits[-1][0]
+    assert "Unsaved: <b>Only</b>" in unsaved.message.edits[-1][0]
+
+    select_page = FakeCallback(user, f"wlsp:{token}:0")
+    await watchlist_library_select_page(
+        select_page,
+        users,
+        catalog,
+        sessions,
+        _config(),
+    )
+    assert len(session.selected_content_ids) == 6
+
+    review = FakeCallback(user, f"wlrv:{token}:0")
+    await watchlist_library_review_toggle(
+        review,
+        users,
+        catalog,
+        sessions,
+        _config(),
+    )
+    assert session.selected_only is True
+    assert "Matching titles: <b>6</b>" in review.message.edits[-1][0]
+
+    clear = FakeCallback(user, f"wlcl:{token}:0")
+    await watchlist_library_clear_selected(
+        clear,
+        users,
+        catalog,
+        sessions,
+        _config(),
+    )
+    assert session.selected_content_ids == set()
+    assert "Selected: <b>0/25</b>" in clear.message.edits[-1][0]
+    assert "No titles match the active filters" in clear.message.edits[-1][0]
 
 
 async def test_community_name_is_editable_but_watchlists_cannot_be_private():

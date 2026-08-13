@@ -6,7 +6,7 @@ from collections import Counter, defaultdict
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import Command, CommandObject, StateFilter
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -62,6 +62,7 @@ class AdminState(StatesGroup):
     category_rename = State()
     category_change_channel = State()
     user_find = State()
+    user_community_name = State()
 
 
 async def _workspace_or_answer(
@@ -117,13 +118,16 @@ async def _show_add_confirmation(
         channel_id = int(raw_channel_id.strip())
         title = await _validate_private_channel(bot, channel_id, config)
     except (ValueError, TypeError) as exc:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data="admin:categories"))
         await _workspace_or_answer(
             message,
             "❌ <b>CHANNEL VALIDATION FAILED</b>\n"
             f"<blockquote>{safe_html(exc)}</blockquote>\n"
             f"{DIVIDER}\n"
-            "Send a valid private channel ID, or use /cancel to stop.",
+            "Send a valid private channel ID, or tap Cancel to stop.",
             panels,
+            builder.as_markup(),
         )
         return
     mode = _default_category_mode(name)
@@ -153,14 +157,9 @@ async def _show_add_confirmation(
     )
 
 
-@router.message(Command("admin"), owner)
-async def admin_command(message: Message) -> None:
-    text, markup = admin_dashboard()
-    await message.answer(text, reply_markup=markup)
-
-
 @router.callback_query(F.data == "admin:home", owner)
-async def admin_home(callback: CallbackQuery) -> None:
+async def admin_home(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     await callback.answer()
     text, markup = admin_dashboard()
     await edit_screen(callback, text, markup)
@@ -204,24 +203,30 @@ async def manual_index_command(
     if indexed:
         await message.answer("✅ The original channel post has been indexed.")
     else:
-        await message.answer("The file could not be indexed. Check /failures for details.")
-
-
-@router.message(Command("categories"), owner)
-async def categories_command(message: Message, catalog: CatalogRepository) -> None:
-    text, markup = admin_categories(catalog.list_categories(include_disabled=True))
-    await message.answer(text, reply_markup=markup)
+        await message.answer(
+            "The file could not be indexed. Open Admin Control Center → Failures for details."
+        )
 
 
 @router.callback_query(F.data == "admin:categories", owner)
-async def categories_callback(callback: CallbackQuery, catalog: CatalogRepository) -> None:
+async def categories_callback(
+    callback: CallbackQuery,
+    catalog: CatalogRepository,
+    state: FSMContext,
+) -> None:
+    await state.clear()
     await callback.answer()
     text, markup = admin_categories(catalog.list_categories(include_disabled=True))
     await edit_screen(callback, text, markup)
 
 
 @router.callback_query(F.data.startswith("ac:"), owner)
-async def category_detail_callback(callback: CallbackQuery, catalog: CatalogRepository) -> None:
+async def category_detail_callback(
+    callback: CallbackQuery,
+    catalog: CatalogRepository,
+    state: FSMContext,
+) -> None:
+    await state.clear()
     category = catalog.get_category(callback.data.split(":", 1)[1])
     if category is None:
         await callback.answer("Category not found.", show_alert=True)
@@ -231,36 +236,12 @@ async def category_detail_callback(callback: CallbackQuery, catalog: CatalogRepo
     await edit_screen(callback, text, markup)
 
 
-@router.message(Command("category_add"), owner)
-async def category_add_command(
-    message: Message,
-    command: CommandObject,
-    state: FSMContext,
-    bot: Bot,
-    config: Config,
-) -> None:
-    await state.clear()
-    if command.args and "|" in command.args:
-        name, channel_id = (value.strip() for value in command.args.split("|", 1))
-        if not name:
-            await message.answer("Category name cannot be empty.")
-            return
-        await _show_add_confirmation(message, state, bot, config, name, channel_id)
-        return
-    await state.set_state(AdminState.category_name)
-    await message.answer(
-        "➕ <b>ADD A CATEGORY</b>\n"
-        "<blockquote>Step 1 of 2 • choose a display name</blockquote>\n"
-        f"{DIVIDER}\n"
-        "Send a short category name, such as <code>Movies</code> or <code>Anime</code>.\n\n"
-        "Use /cancel to stop."
-    )
-
-
 @router.callback_query(F.data == "aca:start", owner)
 async def category_add_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(AdminState.category_name)
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data="admin:categories"))
     await callback.answer()
     await edit_screen(
         callback,
@@ -268,12 +249,12 @@ async def category_add_start(callback: CallbackQuery, state: FSMContext) -> None
         "<blockquote>Step 1 of 2 • choose a display name</blockquote>\n"
         f"{DIVIDER}\n"
         "Send a short category name, such as <code>Movies</code> or <code>Anime</code>.\n\n"
-        "Use /cancel to stop.",
-        None,
+        "Use the Cancel button to stop.",
+        builder.as_markup(),
     )
 
 
-@router.message(AdminState.category_name, owner, F.text)
+@router.message(AdminState.category_name, owner, F.text, ~F.text.startswith("/"))
 async def category_name_input(
     message: Message,
     state: FSMContext,
@@ -296,7 +277,7 @@ async def category_name_input(
     )
 
 
-@router.message(AdminState.category_channel, owner, F.text)
+@router.message(AdminState.category_channel, owner, F.text, ~F.text.startswith("/"))
 async def category_channel_input(
     message: Message,
     state: FSMContext,
@@ -353,18 +334,20 @@ async def category_rename_start(callback: CallbackQuery, state: FSMContext) -> N
     category_id = callback.data.split(":", 1)[1]
     await state.set_state(AdminState.category_rename)
     await state.update_data(category_id=category_id)
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data=f"ac:{category_id}"))
     await callback.answer()
     await edit_screen(
         callback,
         "✏️ <b>RENAME CATEGORY</b>\n"
         "<blockquote>Update the display name without changing its files.</blockquote>\n"
         f"{DIVIDER}\n"
-        "Send the new category name, or use /cancel to stop.",
-        None,
+        "Send the new category name, or tap Cancel to stop.",
+        builder.as_markup(),
     )
 
 
-@router.message(AdminState.category_rename, owner, F.text)
+@router.message(AdminState.category_rename, owner, F.text, ~F.text.startswith("/"))
 async def category_rename_input(
     message: Message,
     state: FSMContext,
@@ -389,6 +372,8 @@ async def category_channel_start(callback: CallbackQuery, state: FSMContext) -> 
     category_id = callback.data.split(":", 1)[1]
     await state.set_state(AdminState.category_change_channel)
     await state.update_data(category_id=category_id)
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data=f"ac:{category_id}"))
     await callback.answer()
     await edit_screen(
         callback,
@@ -397,11 +382,11 @@ async def category_channel_start(callback: CallbackQuery, state: FSMContext) -> 
         f"{DIVIDER}\n"
         "Send the new private channel ID.\n\n"
         "🗄 The previous channel remains registered as a legacy source for existing files.",
-        None,
+        builder.as_markup(),
     )
 
 
-@router.message(AdminState.category_change_channel, owner, F.text)
+@router.message(AdminState.category_change_channel, owner, F.text, ~F.text.startswith("/"))
 async def category_channel_change_input(
     message: Message,
     state: FSMContext,
@@ -529,13 +514,6 @@ async def _stats_text(catalog: CatalogRepository, users: UserRepository) -> str:
     )
 
 
-@router.message(Command("stats"), owner)
-async def stats_command(
-    message: Message, catalog: CatalogRepository, users: UserRepository
-) -> None:
-    await message.answer(await _stats_text(catalog, users))
-
-
 @router.callback_query(F.data == "admin:stats", owner)
 async def stats_callback(
     callback: CallbackQuery, catalog: CatalogRepository, users: UserRepository
@@ -591,13 +569,6 @@ def _files_markup(catalog: CatalogRepository) -> InlineKeyboardBuilder:
         )
     builder.row(InlineKeyboardButton(text="◀️ Admin panel", callback_data="admin:home"))
     return builder
-
-
-@router.message(Command("files"), owner)
-async def files_command(message: Message, catalog: CatalogRepository) -> None:
-    await message.answer(
-        await _files_text(catalog), reply_markup=_files_markup(catalog).as_markup()
-    )
 
 
 @router.callback_query(F.data == "admin:files", owner)
@@ -978,23 +949,12 @@ async def _failures_text(catalog: CatalogRepository) -> str:
     return "\n".join(lines)
 
 
-@router.message(Command("failures"), owner)
-async def failures_command(message: Message, catalog: CatalogRepository) -> None:
-    await message.answer(await _failures_text(catalog))
-
-
 @router.callback_query(F.data == "admin:failures", owner)
 async def failures_callback(callback: CallbackQuery, catalog: CatalogRepository) -> None:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="◀️ Admin panel", callback_data="admin:home"))
     await callback.answer()
     await edit_screen(callback, await _failures_text(catalog), builder.as_markup())
-
-
-@router.message(Command("access_mode"), owner)
-async def access_command(message: Message, users: UserRepository) -> None:
-    text, markup = access_mode_panel(users.snapshot().access_mode)
-    await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(F.data == "admin:access", owner)
@@ -1049,14 +1009,13 @@ async def access_set(
     await edit_screen(callback, text, markup)
 
 
-@router.message(Command("users"), owner)
-async def users_command(message: Message, users: UserRepository) -> None:
-    text, markup = users_panel(users.list_users())
-    await message.answer(text, reply_markup=markup)
-
-
 @router.callback_query(F.data == "admin:users", owner)
-async def users_callback(callback: CallbackQuery, users: UserRepository) -> None:
+async def users_callback(
+    callback: CallbackQuery,
+    users: UserRepository,
+    state: FSMContext,
+) -> None:
+    await state.clear()
     text, markup = users_panel(users.list_users())
     await callback.answer()
     await edit_screen(callback, text, markup)
@@ -1109,7 +1068,12 @@ async def user_status_list(callback: CallbackQuery, users: UserRepository) -> No
 
 
 @router.callback_query(F.data.startswith("au:"), owner)
-async def user_detail_callback(callback: CallbackQuery, users: UserRepository) -> None:
+async def user_detail_callback(
+    callback: CallbackQuery,
+    users: UserRepository,
+    state: FSMContext,
+) -> None:
+    await state.clear()
     user = users.get_user(int(callback.data.split(":", 1)[1]))
     if user is None:
         await callback.answer("User not found.", show_alert=True)
@@ -1119,9 +1083,98 @@ async def user_detail_callback(callback: CallbackQuery, users: UserRepository) -
     await edit_screen(callback, text, markup)
 
 
+@router.callback_query(F.data.startswith("aucn:"), owner)
+async def user_community_name_start(
+    callback: CallbackQuery,
+    users: UserRepository,
+    state: FSMContext,
+) -> None:
+    user_id = int((callback.data or "").split(":", 1)[1])
+    user = users.get_user(user_id)
+    if user is None:
+        await callback.answer("User not found.", show_alert=True)
+        return
+    await state.set_state(AdminState.user_community_name)
+    await state.update_data(target_user_id=user_id)
+    builder = InlineKeyboardBuilder()
+    if user.watchlist_display_name:
+        builder.row(
+            InlineKeyboardButton(
+                text="↩️ Reset to Telegram name",
+                callback_data=f"aucnr:{user_id}",
+            )
+        )
+    builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data=f"au:{user_id}"))
+    await callback.answer()
+    await edit_screen(
+        callback,
+        "✏️ <b>EDIT COMMUNITY NAME</b>\n"
+        f"<blockquote>{safe_html(user.first_name)} • owner moderation</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"Current public name: <b>{safe_html(user.watchlist_display_name or user.first_name)}</b>\n\n"
+        "Send a replacement name up to 40 characters. The user's Telegram profile is unchanged.",
+        builder.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("aucnr:"), owner)
+async def user_community_name_reset(
+    callback: CallbackQuery,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    state: FSMContext,
+) -> None:
+    user_id = int((callback.data or "").split(":", 1)[1])
+    try:
+        user = await users.set_watchlist_display_name(user_id, None)
+    except ValueError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await catalog.add_audit(
+        "user.community_name",
+        f"Reset community name for user {user_id}",
+        callback.from_user.id,
+    )
+    await state.clear()
+    text, markup = user_detail(user)
+    await callback.answer("Community name reset.")
+    await edit_screen(callback, text, markup)
+
+
+@router.message(AdminState.user_community_name, owner, F.text, ~F.text.startswith("/"))
+async def user_community_name_input(
+    message: Message,
+    state: FSMContext,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    panels: PanelManager | None = None,
+) -> None:
+    data = await state.get_data()
+    user_id = data.get("target_user_id")
+    if not isinstance(user_id, int):
+        await state.clear()
+        await message.answer("This community-name session expired.")
+        return
+    try:
+        user = await users.set_watchlist_display_name(user_id, message.text)
+    except ValueError as exc:
+        await message.answer(f"❌ {safe_html(exc)}")
+        return
+    await catalog.add_audit(
+        "user.community_name",
+        f"Changed community name for user {user_id}",
+        message.from_user.id if message.from_user else None,
+    )
+    await state.clear()
+    text, markup = user_detail(user)
+    await _workspace_or_answer(message, text, panels, markup)
+
+
 @router.callback_query(F.data == "auf:start", owner)
 async def user_find_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminState.user_find)
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data="admin:users"))
     await callback.answer()
     await edit_screen(
         callback,
@@ -1129,12 +1182,12 @@ async def user_find_start(callback: CallbackQuery, state: FSMContext) -> None:
         "<blockquote>Search by an exact Telegram identity.</blockquote>\n"
         f"{DIVIDER}\n"
         "Send a numeric user ID or exact <code>@username</code>.\n\n"
-        "Use /cancel to stop.",
-        None,
+        "Use the Cancel button to stop.",
+        builder.as_markup(),
     )
 
 
-@router.message(AdminState.user_find, owner, F.text)
+@router.message(AdminState.user_find, owner, F.text, ~F.text.startswith("/"))
 async def user_find_input(
     message: Message,
     state: FSMContext,
@@ -1153,7 +1206,7 @@ async def user_find_input(
     if user is None:
         await message.answer(
             "🔍 <b>USER NOT FOUND</b>\n"
-            "Check the numeric ID or exact username, then try again. Use /cancel to stop."
+            "Check the numeric ID or exact username, then try again. Use the Cancel button to stop."
         )
         return
     await state.clear()
@@ -1212,13 +1265,6 @@ async def _db_status_text(catalog: CatalogRepository, users: UserRepository) -> 
     )
 
 
-@router.message(Command("db_status"), owner)
-async def db_status_command(
-    message: Message, catalog: CatalogRepository, users: UserRepository
-) -> None:
-    await message.answer(await _db_status_text(catalog, users))
-
-
 @router.callback_query(F.data == "admin:database", owner)
 async def database_callback(
     callback: CallbackQuery, catalog: CatalogRepository, users: UserRepository
@@ -1254,17 +1300,6 @@ async def _send_backup(
     )
 
 
-@router.message(Command("backup"), owner)
-async def backup_command(
-    message: Message,
-    bot: Bot,
-    catalog: CatalogRepository,
-    users: UserRepository,
-) -> None:
-    await message.answer("Preparing backups…")
-    await _send_backup(message.from_user.id, bot, catalog, users)
-
-
 @router.callback_query(F.data == "adb:backup", owner)
 async def backup_callback(
     callback: CallbackQuery,
@@ -1297,11 +1332,6 @@ async def _audit_text(catalog: CatalogRepository) -> str:
     return "\n".join(lines)
 
 
-@router.message(Command("audit"), owner)
-async def audit_command(message: Message, catalog: CatalogRepository) -> None:
-    await message.answer(await _audit_text(catalog))
-
-
 @router.callback_query(F.data == "admin:audit", owner)
 async def audit_callback(callback: CallbackQuery, catalog: CatalogRepository) -> None:
     builder = InlineKeyboardBuilder()
@@ -1320,13 +1350,8 @@ def _settings_text(config: Config, users: UserRepository) -> str:
         f"{protection_icon} <b>Protected delivery</b>  •  "
         f"{'Enabled' if config.protect_delivered_content else 'Disabled'}\n"
         "🔎 <b>Search page size</b>  •  4 results\n"
-        "📱 <b>Interface</b>  •  native commands + inline dashboard"
+        "📱 <b>Interface</b>  •  dashboard-first native controls"
     )
-
-
-@router.message(Command("bot_settings"), owner)
-async def bot_settings_command(message: Message, config: Config, users: UserRepository) -> None:
-    await message.answer(_settings_text(config, users))
 
 
 @router.callback_query(F.data == "admin:settings", owner)

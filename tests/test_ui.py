@@ -18,6 +18,7 @@ from app.ui import (
     season_screen,
     watchlist_add_method,
     watchlist_category_picker,
+    watchlist_custom_batch_preview,
     watchlist_entries,
     watchlist_entry_detail,
     watchlist_home,
@@ -121,3 +122,17 @@ def test_watchlist_panel_callbacks_are_bounded_and_shared_details_are_read_only(
     shared_markup = watchlist_entry_detail(entry, owner, own=False, content_available=True)[1]
     shared_callbacks = _callbacks(shared_markup)
     assert not any(value.startswith(("wlu:", "wld:")) for value in shared_callbacks)
+
+
+def test_custom_batch_preview_stays_within_telegram_text_button_and_callback_limits():
+    titles = [f"Title {index} <&> " + ("x" * 140) for index in range(25)]
+    text, markup = watchlist_custom_batch_preview(titles, set(range(25)))
+    buttons = [button for row in markup.inline_keyboard for button in row]
+
+    assert len(text) <= 4096
+    assert "&lt;&amp;&gt;" in text
+    assert all(len(button.text) <= 64 for button in buttons)
+    assert all(
+        button.callback_data is None or len(button.callback_data.encode("utf-8")) <= 64
+        for button in buttons
+    )

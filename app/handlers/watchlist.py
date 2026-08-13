@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from aiogram import Bot, F, Router
-from aiogram.filters import Command, StateFilter
+from aiogram import F, Router
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
@@ -20,14 +20,17 @@ from ..ui import (
     watchlist_add_method,
     watchlist_alphabet_picker,
     watchlist_category_picker,
+    watchlist_custom_batch_preview,
+    watchlist_custom_input,
     watchlist_entries,
     watchlist_entry_detail,
     watchlist_home,
+    watchlist_library_filter,
     watchlist_library_results,
     watchlist_library_status_picker,
     watchlist_status_picker,
 )
-from ..utils import compact_label, safe_html
+from ..utils import compact_label, normalize_title, safe_html
 from .common import edit_screen
 
 router = Router(name="watchlist")
@@ -46,6 +49,7 @@ class WatchlistAddState(StatesGroup):
     manual_title = State()
     manual_status = State()
     catalog_query = State()
+    catalog_filter = State()
     catalog_status = State()
     community_name = State()
 
@@ -86,35 +90,6 @@ def _watchlist_library_contents(
 
 def _saved_catalog_ids(profile: UserProfile) -> set[str]:
     return {entry.content_id for entry in profile.watchlist.values() if entry.content_id}
-
-
-async def _show_watchlist_message(
-    message: Message,
-    users: UserRepository,
-    config: Config,
-    bot: Bot,
-    state: FSMContext,
-) -> None:
-    if message.from_user is None:
-        return
-    profile, _ = await ensure_registered(message.from_user, users, config, bot)
-    if not can_use_bot(profile, config):
-        await message.answer(access_denied_text(profile))
-        return
-    await state.clear()
-    text, markup = watchlist_home(profile)
-    await message.answer(text, reply_markup=markup)
-
-
-@router.message(Command("watchlist"))
-async def watchlist_command(
-    message: Message,
-    users: UserRepository,
-    config: Config,
-    bot: Bot,
-    state: FSMContext,
-) -> None:
-    await _show_watchlist_message(message, users, config, bot, state)
 
 
 @router.callback_query(F.data == "menu:watchlist")
@@ -159,7 +134,7 @@ async def manual_add_start(
     if await _active_callback(callback, users, config) is None:
         return
     await state.clear()
-    text, markup = watchlist_category_picker(catalog.list_categories(), "wamc", "Manual title")
+    text, markup = watchlist_category_picker(catalog.list_categories(), "wamc", "Custom titles")
     await callback.answer()
     await edit_screen(callback, text, markup)
 
@@ -182,30 +157,18 @@ async def manual_category_selected(
     await state.set_state(WatchlistAddState.manual_title)
     await state.update_data(category_id=category.id, category_name=category.name)
     await callback.answer()
-    await edit_screen(
-        callback,
-        "✍️ <b>ADD A CUSTOM TITLE</b>\n"
-        f"<blockquote>{safe_html(category.name)} • Step 2 of 3</blockquote>\n"
-        f"{DIVIDER}\n"
-        "⌨️ Send the title name in your next message.\n\n"
-        "💡 You can save any title, even when it is not in the library.",
-        _cancel_markup().as_markup(),
-    )
+    text, markup = watchlist_custom_input(category.name)
+    await edit_screen(callback, text, markup)
 
 
-@router.message(WatchlistAddState.manual_title, F.text)
-async def manual_title_received(
+async def _render_custom_preview_message(
     message: Message,
-    state: FSMContext,
-    panels: PanelManager | None = None,
+    *,
+    titles: list[str],
+    selected: set[int],
+    panels: PanelManager | None,
 ) -> None:
-    title = " ".join(message.text.split()).strip()
-    if not title or len(title) > 160:
-        await message.answer("Send a title between 1 and 160 characters, or /cancel.")
-        return
-    await state.update_data(title=title)
-    await state.set_state(WatchlistAddState.manual_status)
-    text, markup = watchlist_status_picker(title, "wams")
+    text, markup = watchlist_custom_batch_preview(titles, selected)
     if message.from_user and panels:
         rendered = await panels.render_existing_workspace(
             user_id=message.from_user.id,
@@ -215,6 +178,117 @@ async def manual_title_received(
         if rendered:
             return
     await message.answer(text, reply_markup=markup)
+
+
+@router.message(WatchlistAddState.manual_title, F.text, ~F.text.startswith("/"))
+async def manual_title_received(
+    message: Message,
+    state: FSMContext,
+    panels: PanelManager | None = None,
+) -> None:
+    titles: list[str] = []
+    normalized_seen: set[str] = set()
+    for line in message.text.splitlines():
+        title = " ".join(line.split()).strip()
+        if not title:
+            continue
+        if len(title) > 160:
+            await message.answer("❌ Every title must be 160 characters or fewer.")
+            return
+        normalized = normalize_title(title)
+        if normalized and normalized not in normalized_seen:
+            normalized_seen.add(normalized)
+            titles.append(title)
+    if not titles:
+        await message.answer("❌ Send at least one title, with one title per line.")
+        return
+    if len(titles) > 25:
+        await message.answer("❌ Send no more than 25 unique titles at once.")
+        return
+    selected = set(range(len(titles)))
+    await state.update_data(titles=titles, selected_indices=sorted(selected))
+    await _render_custom_preview_message(
+        message,
+        titles=titles,
+        selected=selected,
+        panels=panels,
+    )
+
+
+def _custom_batch_state(data: dict[str, object]) -> tuple[list[str], set[int]] | None:
+    raw_titles = data.get("titles")
+    raw_selected = data.get("selected_indices")
+    if not isinstance(raw_titles, list) or not all(isinstance(title, str) for title in raw_titles):
+        return None
+    if not isinstance(raw_selected, list) or not all(
+        isinstance(index, int) for index in raw_selected
+    ):
+        return None
+    titles = list(raw_titles)
+    selected = {index for index in raw_selected if 0 <= index < len(titles)}
+    return titles, selected
+
+
+@router.callback_query(WatchlistAddState.manual_title, F.data.startswith("wctp:"))
+async def manual_title_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+    batch = _custom_batch_state(await state.get_data())
+    if batch is None:
+        await callback.answer("This custom-title batch expired.", show_alert=True)
+        return
+    titles, selected = batch
+    try:
+        index = int((callback.data or "").split(":", 1)[1])
+    except ValueError:
+        await callback.answer("Invalid title selection.", show_alert=True)
+        return
+    if not 0 <= index < len(titles):
+        await callback.answer("Invalid title selection.", show_alert=True)
+        return
+    if index in selected:
+        selected.remove(index)
+    else:
+        selected.add(index)
+    await state.update_data(selected_indices=sorted(selected))
+    text, markup = watchlist_custom_batch_preview(titles, selected)
+    await callback.answer()
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(WatchlistAddState.manual_title, F.data.startswith("wcta:"))
+async def manual_title_select_all(callback: CallbackQuery, state: FSMContext) -> None:
+    batch = _custom_batch_state(await state.get_data())
+    if batch is None:
+        await callback.answer("This custom-title batch expired.", show_alert=True)
+        return
+    titles, _ = batch
+    action = (callback.data or "").split(":", 1)[1]
+    selected = set(range(len(titles))) if action == "all" else set()
+    await state.update_data(selected_indices=sorted(selected))
+    text, markup = watchlist_custom_batch_preview(titles, selected)
+    await callback.answer()
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(WatchlistAddState.manual_title, F.data == "wct:continue")
+async def manual_title_continue(callback: CallbackQuery, state: FSMContext) -> None:
+    batch = _custom_batch_state(await state.get_data())
+    if batch is None:
+        await callback.answer("This custom-title batch expired.", show_alert=True)
+        return
+    titles, selected = batch
+    selected_titles = [title for index, title in enumerate(titles) if index in selected]
+    if not selected_titles:
+        await callback.answer("Select at least one title.", show_alert=True)
+        return
+    await state.update_data(selected_titles=selected_titles)
+    await state.set_state(WatchlistAddState.manual_status)
+    text, markup = watchlist_status_picker(
+        f"{len(selected_titles)} custom titles",
+        "wams",
+        plural=True,
+    )
+    await callback.answer()
+    await edit_screen(callback, text, markup)
 
 
 @router.callback_query(WatchlistAddState.manual_status, F.data.startswith("wams:"))
@@ -232,7 +306,13 @@ async def manual_status_selected(
         await callback.answer("Invalid status.", show_alert=True)
         return
     data = await state.get_data()
-    if not all(key in data for key in ("title", "category_id", "category_name")):
+    titles = data.get("selected_titles")
+    if (
+        not isinstance(titles, list)
+        or not titles
+        or not all(isinstance(title, str) for title in titles)
+        or not all(key in data for key in ("category_id", "category_name"))
+    ):
         await state.clear()
         await callback.answer("This add-title session expired.", show_alert=True)
         return
@@ -241,9 +321,9 @@ async def manual_status_selected(
         await state.clear()
         await callback.answer("Category is no longer available.", show_alert=True)
         return
-    _, created = await users.upsert_watchlist_entry(
+    result = await users.bulk_upsert_manual_watchlist(
         user_id=callback.from_user.id,
-        title=data["title"],
+        titles=titles,
         category_id=category.id,
         category_name=category.name,
         status=status,
@@ -253,7 +333,7 @@ async def manual_status_selected(
     if profile is None:
         raise RuntimeError("Registered watchlist owner disappeared")
     text, markup = watchlist_home(profile)
-    await callback.answer("✅ Title added." if created else "✅ Existing title updated.")
+    await callback.answer(f"✅ {result.created} added • {result.updated} updated")
     await edit_screen(callback, text, markup)
 
 
@@ -320,10 +400,13 @@ async def watchlist_library_page(
     catalog: CatalogRepository,
     sessions: SearchSessionStore,
     config: Config,
+    state: FSMContext,
 ) -> None:
     profile = await _active_callback(callback, users, config)
     if profile is None:
         return
+    if await state.get_state() == WatchlistAddState.catalog_filter.state:
+        await state.clear()
     _, token, page_text = (callback.data or "").split(":", 2)
     session = _watchlist_library_session(sessions, token, callback.from_user.id)
     if session is None:
@@ -380,6 +463,248 @@ async def watchlist_library_toggle(
         saved_content_ids=_saved_catalog_ids(profile),
     )
     await callback.answer(f"{len(session.selected_content_ids)} selected")
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(F.data.startswith("wlfq:"))
+async def watchlist_library_search_start(
+    callback: CallbackQuery,
+    users: UserRepository,
+    sessions: SearchSessionStore,
+    config: Config,
+    state: FSMContext,
+) -> None:
+    if await _active_callback(callback, users, config) is None:
+        return
+    _, token, page_text = (callback.data or "").split(":", 2)
+    session = _watchlist_library_session(sessions, token, callback.from_user.id)
+    if session is None:
+        await callback.answer("This library selection expired.", show_alert=True)
+        return
+    await state.set_state(WatchlistAddState.catalog_filter)
+    await state.update_data(library_token=token, library_page=int(page_text))
+    builder = InlineKeyboardBuilder()
+    if session.text_filter:
+        builder.row(
+            InlineKeyboardButton(
+                text="✖️ Clear current search",
+                callback_data=f"wlfc:{token}:{page_text}",
+            )
+        )
+    builder.row(
+        InlineKeyboardButton(
+            text="◀️ Back to titles",
+            callback_data=f"wlbp:{token}:{page_text}",
+        )
+    )
+    await callback.answer()
+    await edit_screen(
+        callback,
+        "🔎 <b>SEARCH THIS COLLECTION</b>\n"
+        f"<blockquote>{safe_html(session.query)} • selection is preserved</blockquote>\n"
+        f"{DIVIDER}\n"
+        "Send part of a title. The picker will show matching titles only.",
+        builder.as_markup(),
+    )
+
+
+@router.message(WatchlistAddState.catalog_filter, F.text, ~F.text.startswith("/"))
+async def watchlist_library_search_input(
+    message: Message,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    sessions: SearchSessionStore,
+    state: FSMContext,
+    panels: PanelManager | None = None,
+) -> None:
+    data = await state.get_data()
+    token = data.get("library_token")
+    if message.from_user is None or not isinstance(token, str):
+        await state.clear()
+        await message.answer("This library search expired.")
+        return
+    session = _watchlist_library_session(sessions, token, message.from_user.id)
+    if session is None:
+        await state.clear()
+        await message.answer("This library selection expired. Open Add Title again.")
+        return
+    search_text = " ".join(message.text.split()).strip()
+    if not search_text or len(search_text) > 80:
+        await message.answer("Send a search between 1 and 80 characters.")
+        return
+    session.text_filter = search_text
+    session.alphabet_filter = None
+    session.selected_only = False
+    profile = users.get_user(message.from_user.id)
+    if profile is None:
+        await state.clear()
+        await message.answer("Your user session expired.")
+        return
+    await state.clear()
+    text, markup = watchlist_library_results(
+        session,
+        _watchlist_library_contents(session, catalog),
+        0,
+        saved_content_ids=_saved_catalog_ids(profile),
+    )
+    if panels:
+        rendered = await panels.render_existing_workspace(
+            user_id=message.from_user.id,
+            text=text,
+            reply_markup=markup,
+        )
+        if rendered:
+            return
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("wlfc:"))
+async def watchlist_library_search_clear(
+    callback: CallbackQuery,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    sessions: SearchSessionStore,
+    config: Config,
+    state: FSMContext,
+) -> None:
+    profile = await _active_callback(callback, users, config)
+    if profile is None:
+        return
+    _, token, _page_text = (callback.data or "").split(":", 2)
+    session = _watchlist_library_session(sessions, token, callback.from_user.id)
+    if session is None:
+        await callback.answer("This library selection expired.", show_alert=True)
+        return
+    session.text_filter = None
+    session.alphabet_filter = None
+    await state.clear()
+    text, markup = watchlist_library_results(
+        session,
+        _watchlist_library_contents(session, catalog),
+        0,
+        saved_content_ids=_saved_catalog_ids(profile),
+    )
+    await callback.answer("Search cleared.")
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(F.data.startswith("wluo:"))
+async def watchlist_library_unsaved_toggle(
+    callback: CallbackQuery,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    sessions: SearchSessionStore,
+    config: Config,
+) -> None:
+    profile = await _active_callback(callback, users, config)
+    if profile is None:
+        return
+    _, token, _page_text = (callback.data or "").split(":", 2)
+    session = _watchlist_library_session(sessions, token, callback.from_user.id)
+    if session is None:
+        await callback.answer("This library selection expired.", show_alert=True)
+        return
+    session.only_unsaved = not session.only_unsaved
+    text, markup = watchlist_library_results(
+        session,
+        _watchlist_library_contents(session, catalog),
+        0,
+        saved_content_ids=_saved_catalog_ids(profile),
+    )
+    await callback.answer(
+        "Showing unsaved titles only." if session.only_unsaved else "Showing all titles."
+    )
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(F.data.startswith("wlrv:"))
+async def watchlist_library_review_toggle(
+    callback: CallbackQuery,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    sessions: SearchSessionStore,
+    config: Config,
+) -> None:
+    profile = await _active_callback(callback, users, config)
+    if profile is None:
+        return
+    _, token, _page_text = (callback.data or "").split(":", 2)
+    session = _watchlist_library_session(sessions, token, callback.from_user.id)
+    if session is None:
+        await callback.answer("This library selection expired.", show_alert=True)
+        return
+    session.selected_only = not session.selected_only
+    text, markup = watchlist_library_results(
+        session,
+        _watchlist_library_contents(session, catalog),
+        0,
+        saved_content_ids=_saved_catalog_ids(profile),
+    )
+    await callback.answer(
+        "Reviewing selected titles." if session.selected_only else "Showing the picker."
+    )
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(F.data.startswith("wlsp:"))
+async def watchlist_library_select_page(
+    callback: CallbackQuery,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    sessions: SearchSessionStore,
+    config: Config,
+) -> None:
+    profile = await _active_callback(callback, users, config)
+    if profile is None:
+        return
+    _, token, page_text = (callback.data or "").split(":", 2)
+    session = _watchlist_library_session(sessions, token, callback.from_user.id)
+    if session is None:
+        await callback.answer("This library selection expired.", show_alert=True)
+        return
+    contents = _watchlist_library_contents(session, catalog)
+    filtered = watchlist_library_filter(session, contents, _saved_catalog_ids(profile))
+    page = max(0, int(page_text))
+    visible = filtered[page * 6 : (page + 1) * 6]
+    remaining = 25 - len(session.selected_content_ids)
+    for content in visible:
+        if content.id not in session.selected_content_ids and remaining > 0:
+            session.selected_content_ids.add(content.id)
+            remaining -= 1
+    text, markup = watchlist_library_results(
+        session,
+        contents,
+        page,
+        saved_content_ids=_saved_catalog_ids(profile),
+    )
+    await callback.answer(f"{len(session.selected_content_ids)} selected")
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(F.data.startswith("wlcl:"))
+async def watchlist_library_clear_selected(
+    callback: CallbackQuery,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    sessions: SearchSessionStore,
+    config: Config,
+) -> None:
+    profile = await _active_callback(callback, users, config)
+    if profile is None:
+        return
+    _, token, page_text = (callback.data or "").split(":", 2)
+    session = _watchlist_library_session(sessions, token, callback.from_user.id)
+    if session is None:
+        await callback.answer("This library selection expired.", show_alert=True)
+        return
+    session.selected_content_ids.clear()
+    text, markup = watchlist_library_results(
+        session,
+        _watchlist_library_contents(session, catalog),
+        int(page_text),
+        saved_content_ids=_saved_catalog_ids(profile),
+    )
+    await callback.answer("Selection cleared.")
     await edit_screen(callback, text, markup)
 
 
@@ -550,7 +875,7 @@ async def catalog_category_selected(
     )
 
 
-@router.message(WatchlistAddState.catalog_query, F.text)
+@router.message(WatchlistAddState.catalog_query, F.text, ~F.text.startswith("/"))
 async def catalog_title_query(
     message: Message,
     query: CatalogQueryService,
@@ -566,7 +891,7 @@ async def catalog_title_query(
     if not matches:
         await message.answer(
             "🔍 <b>NO CATALOG MATCH</b>\n"
-            "Try fewer words or check the spelling. Use /cancel to stop."
+            "Try fewer words or check the spelling. Use the Cancel button to stop."
         )
         return
     builder = InlineKeyboardBuilder()
@@ -814,7 +1139,7 @@ async def community_name_start(
     )
 
 
-@router.message(WatchlistAddState.community_name, F.text)
+@router.message(WatchlistAddState.community_name, F.text, ~F.text.startswith("/"))
 async def community_name_received(
     message: Message,
     users: UserRepository,
@@ -943,4 +1268,4 @@ async def shared_watchlist_entry(
 
 @router.message(StateFilter(WatchlistAddState), ~F.text)
 async def watchlist_non_text_input(message: Message) -> None:
-    await message.answer("⌨️ Please send a text title, or use /cancel to stop.")
+    await message.answer("⌨️ Please send a text title, or tap Cancel to stop.")

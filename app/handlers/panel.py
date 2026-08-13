@@ -55,7 +55,7 @@ async def _authorized_panel_callback(
         valid = valid or panels.is_dashboard(callback.from_user.id, message_id)
     if not valid:
         await callback.answer(
-            "This panel is no longer active. Use /start to recover your pinned dashboard.",
+            "This panel is no longer active. Use /dashboard to repost your pinned dashboard.",
             show_alert=True,
         )
         return None

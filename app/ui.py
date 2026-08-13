@@ -20,7 +20,7 @@ from .models import (
 )
 from .presentation import ActionButton as InlineKeyboardButton
 from .services import CatalogQueryService, SearchSession, variant_label
-from .utils import compact_label, safe_html
+from .utils import compact_label, normalize_title, safe_html
 
 WATCH_CODES = {
     WatchStatus.TO_WATCH: "t",
@@ -681,7 +681,7 @@ def watchlist_home(user: UserProfile) -> tuple[str, InlineKeyboardMarkup]:
             f"👤 Community name  •  <b>{safe_html(watchlist_display_name(user))}</b>\n"
             "🌐 Visibility  •  <b>Always public</b>\n"
             f"{DIVIDER}\n"
-            "Add one custom title or select several library titles together."
+            "Paste a custom batch or select several library titles together."
         ),
         builder.as_markup(),
     )
@@ -696,16 +696,16 @@ def watchlist_add_method() -> tuple[str, InlineKeyboardMarkup]:
     )
     builder.row(
         InlineKeyboardButton(
-            text="✍️ Add a custom title", callback_data="wla:manual", style="primary"
+            text="✍️ Add custom titles", callback_data="wla:manual", style="primary"
         )
     )
     builder.row(InlineKeyboardButton(text="◀️ Watchlist", callback_data="menu:watchlist"))
     return (
         (
             "➕ <b>ADD TO WATCHLIST</b>\n"
-            "<blockquote>Select several library titles or type one custom title.</blockquote>\n"
+            "<blockquote>Select library titles or paste a custom batch.</blockquote>\n"
             f"{DIVIDER}\n"
-            "How would you like to add it?"
+            "How would you like to add titles?"
         ),
         builder.as_markup(),
     )
@@ -725,20 +725,79 @@ def watchlist_category_picker(
             )
         )
     builder.row(InlineKeyboardButton(text="◀️ Add title", callback_data="wla:start"))
+    custom_batch = callback_prefix == "wamc"
     prompt = (
         "Which collection would you like to browse?"
         if callback_prefix == "wlbc"
-        else "Where does this title belong?"
+        else "Where do these titles belong?"
     )
     text = (
         f"🗂 <b>{safe_html(heading.upper())}</b>\n"
-        "<blockquote>Step 1 of 3 • choose a collection</blockquote>\n"
+        f"<blockquote>Step 1 of {4 if custom_batch else 3} • choose a collection</blockquote>\n"
         f"{DIVIDER}\n"
         f"{prompt}"
     )
     if not categories:
         text += "\n\n🫙 <i>No enabled categories are available.</i>"
     return text, builder.as_markup()
+
+
+def watchlist_custom_input(category_name: str) -> tuple[str, InlineKeyboardMarkup]:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data="watchlist:add"))
+    return (
+        (
+            "✍️ <b>CUSTOM TITLE BATCH</b>\n"
+            f"<blockquote>{safe_html(category_name)} • Step 2 of 4 • up to 25 titles</blockquote>\n"
+            f"{DIVIDER}\n"
+            "Send one title per line. Blank lines and repeated titles are ignored; each title may be "
+            "up to 160 characters. You can review and untick titles before saving."
+        ),
+        builder.as_markup(),
+    )
+
+
+def watchlist_custom_batch_preview(
+    titles: list[str],
+    selected: set[int],
+) -> tuple[str, InlineKeyboardMarkup]:
+    builder = InlineKeyboardBuilder()
+    for index, title in enumerate(titles):
+        marker = "✅" if index in selected else "☐"
+        label = title if len(title) <= 42 else f"{title[:39]}…"
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{marker} {label}",
+                callback_data=f"wctp:{index}",
+                style="success" if index in selected else None,
+            )
+        )
+    builder.row(
+        InlineKeyboardButton(text="✅ Select all", callback_data="wcta:all"),
+        InlineKeyboardButton(text="🧹 Clear", callback_data="wcta:none"),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=f"Continue with {len(selected)} ›",
+            callback_data="wct:continue",
+            style="primary",
+        )
+    )
+    builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data="watchlist:add"))
+    preview = "\n".join(
+        f"{'✅' if index in selected else '▫️'} {safe_html(title[:88])}"
+        f"{'…' if len(title) > 88 else ''}"
+        for index, title in enumerate(titles)
+    )
+    return (
+        (
+            "☑️ <b>REVIEW CUSTOM TITLES</b>\n"
+            f"<blockquote>Step 3 of 4 • {len(selected)} of {len(titles)} selected</blockquote>\n"
+            f"{DIVIDER}\n{preview}\n\n"
+            "Tap a title to include or exclude it, then continue to choose one status for the batch."
+        ),
+        builder.as_markup(),
+    )
 
 
 def watchlist_title_initial(title: str) -> str:
@@ -752,11 +811,24 @@ def watchlist_title_initial(title: str) -> str:
 def watchlist_library_filter(
     session: SearchSession,
     contents: list[ContentRecord],
+    saved_content_ids: set[str] | None = None,
 ) -> list[ContentRecord]:
-    alphabet = session.alphabet_filter
-    if alphabet is None:
-        return contents
-    return [content for content in contents if watchlist_title_initial(content.title) == alphabet]
+    saved_content_ids = saved_content_ids or set()
+    filtered = contents
+    if session.alphabet_filter is not None:
+        filtered = [
+            content
+            for content in filtered
+            if watchlist_title_initial(content.title) == session.alphabet_filter
+        ]
+    if session.text_filter:
+        query = normalize_title(session.text_filter)
+        filtered = [content for content in filtered if query in content.normalized_title]
+    if session.only_unsaved:
+        filtered = [content for content in filtered if content.id not in saved_content_ids]
+    if session.selected_only:
+        filtered = [content for content in filtered if content.id in session.selected_content_ids]
+    return filtered
 
 
 def watchlist_library_results(
@@ -767,7 +839,8 @@ def watchlist_library_results(
     saved_content_ids: set[str] | None = None,
     page_size: int = 6,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    filtered = watchlist_library_filter(session, contents)
+    saved_content_ids = saved_content_ids or set()
+    filtered = watchlist_library_filter(session, contents, saved_content_ids)
     visible, page, pages = page_slice(filtered, page, page_size)
     selected = session.selected_content_ids
     saved_content_ids = saved_content_ids or set()
@@ -811,10 +884,42 @@ def watchlist_library_results(
     alphabet_label = session.alphabet_filter or "All"
     builder.row(
         InlineKeyboardButton(
+            text=(
+                f"🔎 {compact_label(session.text_filter, 22)}"
+                if session.text_filter
+                else "🔎 Search"
+            ),
+            callback_data=f"wlfq:{session.token}:{page}",
+            style="success" if session.text_filter else "primary",
+        ),
+        InlineKeyboardButton(
+            text="✅ Unsaved only" if session.only_unsaved else "📭 Unsaved only",
+            callback_data=f"wluo:{session.token}:{page}",
+            style="success" if session.only_unsaved else None,
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="☑️ Select page",
+            callback_data=f"wlsp:{session.token}:{page}",
+            style="primary",
+        ),
+        InlineKeyboardButton(
+            text="🧹 Clear selected",
+            callback_data=f"wlcl:{session.token}:{page}",
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
             text=f"🔤 Alphabet · {alphabet_label}",
             callback_data=f"wlba:{session.token}:{page}",
             style="primary",
-        )
+        ),
+        InlineKeyboardButton(
+            text="✅ Selected only" if session.selected_only else "👁 Review selected",
+            callback_data=f"wlrv:{session.token}:{page}",
+            style="success" if session.selected_only else None,
+        ),
     )
     builder.row(
         InlineKeyboardButton(
@@ -832,11 +937,13 @@ def watchlist_library_results(
         f"<blockquote>{safe_html(session.query)} • alphabetical catalog</blockquote>\n"
         f"{DIVIDER}\n"
         f"🎞 Matching titles: <b>{len(filtered)}</b>  •  Selected: <b>{len(selected)}/25</b>\n"
-        f"🔤 Alphabet: <b>{safe_html(alphabet_label)}</b>  •  {_page_line(page, pages)}\n\n"
+        f"🔤 Alphabet: <b>{safe_html(alphabet_label)}</b>  •  {_page_line(page, pages)}\n"
+        f"🔎 Search: <b>{safe_html(session.text_filter or 'Off')}</b>  •  "
+        f"Unsaved: <b>{'Only' if session.only_unsaved else 'All'}</b>\n\n"
         "Tap ☐ or the title to select it. 📚 marks a title already in your Watchlist."
     )
     if not filtered:
-        text += "\n\n🫙 <i>No titles are available under this alphabet.</i>"
+        text += "\n\n🫙 <i>No titles match the active filters.</i>"
     return text, builder.as_markup()
 
 
@@ -928,7 +1035,12 @@ def watchlist_library_status_picker(
     )
 
 
-def watchlist_status_picker(title: str, callback_prefix: str) -> tuple[str, InlineKeyboardMarkup]:
+def watchlist_status_picker(
+    title: str,
+    callback_prefix: str,
+    *,
+    plural: bool = False,
+) -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
     labels = {
         WatchStatus.TO_WATCH: "🕓 To Watch",
@@ -949,7 +1061,7 @@ def watchlist_status_picker(title: str, callback_prefix: str) -> tuple[str, Inli
             f"➕ <b>{safe_html(title)}</b>\n"
             "<blockquote>Final step • choose a status</blockquote>\n"
             f"{DIVIDER}\n"
-            "Where should this title go?"
+            f"Where should {'these titles' if plural else 'this title'} go?"
         ),
         builder.as_markup(),
     )
@@ -1304,6 +1416,13 @@ def user_detail(user: UserProfile) -> tuple[str, InlineKeyboardMarkup]:
             style="danger",
         )
     )
+    builder.row(
+        InlineKeyboardButton(
+            text="✏️ Edit community name",
+            callback_data=f"aucn:{user.telegram_user_id}",
+            style="primary",
+        )
+    )
     builder.row(InlineKeyboardButton(text="◀️ Users", callback_data="admin:users"))
     username = f"@{safe_html(user.username)}" if user.username else "Not set"
     status_icons = {
@@ -1320,6 +1439,7 @@ def user_detail(user: UserProfile) -> tuple[str, InlineKeyboardMarkup]:
         f"🔗 <b>Username</b>  •  {username}\n"
         f"{status_icons[user.status]} <b>Status</b>  •  {safe_html(user.status.value.title())}\n"
         f"📅 <b>Joined</b>  •  {safe_html(user.created_at)}\n"
-        f"📚 <b>Watchlist</b>  •  {len(user.watchlist)} titles"
+        f"📚 <b>Watchlist</b>  •  {len(user.watchlist)} titles\n"
+        f"🌐 <b>Community name</b>  •  {safe_html(watchlist_display_name(user))}"
     )
     return text, builder.as_markup()

@@ -28,6 +28,9 @@ class SearchSession:
     result_heading: str = "SEARCH RESULTS"
     selected_content_ids: set[str] = field(default_factory=set)
     alphabet_filter: str | None = None
+    text_filter: str | None = None
+    only_unsaved: bool = False
+    selected_only: bool = False
     context: str = "catalog"
 
 

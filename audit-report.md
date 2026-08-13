@@ -13,8 +13,9 @@ This report records checks performed before packaging. It is not a claim that li
 - One persisted pinned dashboard plus one persisted/reused temporary workspace per user
 - Sliding five-minute workspace expiry, callback/message activity resets, restart cleanup, and concurrent-open serialization
 - Search/Browse/Recently Added checkbox emulation, cross-page selection, and atomic bulk Watchlist insertion
-- Alphabetical Watchlist-library browsing, A–Z/# jumps, pagination, persistent ticks and atomic status insertion
-- Always-public community Watchlists with editable, HTML-safe display names and visible usernames
+- Alphabetical Watchlist-library browsing, in-category search, unsaved filtering, A–Z/# jumps, pagination, Select Page/Clear/review power tools, persistent ticks and atomic status insertion
+- Custom Watchlist batches of up to 25 normalized/deduplicated titles, preview ticks, one status, and one atomic commit
+- Always-public community Watchlists with editable, HTML-safe display names and visible usernames, including owner edit/reset moderation
 - Post-delivery workspace replacement below protected media without leaving two active workspaces
 - Unified owner dashboard with an authorization-checked Admin Control Center entry
 - Semantic Bot API button styles (`primary`, `success`, `danger`) with neutral secondary actions
@@ -22,7 +23,7 @@ This report records checks performed before packaging. It is not a claim that li
 - Absence of custom-emoji dependencies and preservation of existing callback contracts
 - Series episodes, variants and split season packs
 - Protected delivery, structured delivery captions and Telegram file-ID fallback
-- Native user/owner command scopes
+- Dashboard-final native command scope, emergency dashboard repost/rollback, hidden `/start` onboarding, and owner-only reply-based `/index` recovery
 - Private-chat and owner authorization filters
 - Caption metadata allowlisting and supplied real-world formats
 - HTML escaping of user/catalog text
@@ -51,19 +52,23 @@ This report records checks performed before packaging. It is not a claim that li
 17. Replaced the community privacy control with an editable 40-character community display name. Schema v4 converts every previously private list back to public, the repository rejects future private-mode requests, the old privacy callback remains handled for historical cards, and the real Telegram username remains visible in the community directory when available.
 18. Replaced the new Watchlist catalog-entry screen with a complete category catalog: case-insensitive alphabetical ordering, six titles per page, A–Z/# direct filtering, checkbox/title-button toggles, selection retention across filters and pages, already-saved markers, a 25-title bound, and atomic bulk status insertion. The former typed-search callbacks remain registered for historical cards.
 19. After successful protected delivery, the lifecycle manager deletes or disables the previous workspace and posts a fresh temporary dashboard below the file. The pinned dashboard remains untouched, the replacement becomes the sole active workspace, and delivery success is never rolled back if repositioning controls fails.
+20. Replaced single custom-title entry with category-first batches of up to 25 one-per-line titles. Input is whitespace-normalized, deduplicated by normalized title, length/limit validated, selected by default in a tick preview, assigned one of the same three statuses, and inserted/updated in one rollback-safe snapshot transaction.
+21. Strengthened the Watchlist library picker without replacing its alphabetical model: in-category search, unsaved-only filtering, Select Page, Clear Selection and selected-only review now compose with pagination, A–Z/`#`, saved markers, the 25-title bound and atomic bulk insertion.
+22. Added owner moderation of another user's public Community display name from User Management, including edit, reset-to-Telegram-name, validation, escaped rendering and catalog audit events. Telegram profile fields and mandatory-public visibility remain unchanged.
+23. Declared the dashboard final: removed legacy user/admin command handlers and command-menu entries, retained hidden Telegram `/start` onboarding/deep links and owner reply-based `/index`, and exposed only `/dashboard`. The emergency action posts and pins a fresh dashboard, retires the old card, and rolls back safely if snapshot persistence fails.
 
 ## Automated results at package time
 
 - Ruff lint: passed
 - Ruff formatting check: passed
 - Python compileall: passed
-- Pytest with warnings treated as errors: passed (87 tests)
-- Test coverage: 63% overall; parser 98%, snapshot storage 84%, repositories 73%, services 87%, panel handlers 61%, Watchlist handlers 56%, delivery/search handlers 48%, panel lifecycle manager 64%, UI 73%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
+- Pytest with warnings treated as errors: passed (95 tests)
+- Test coverage: 64% overall; parser 98%, snapshot storage 84%, repositories 74%, services 87%, panel handlers 61%, Watchlist handlers 60%, delivery/search handlers 48%, panel lifecycle manager 66%, UI 77%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
 - Bandit: passed; the required Railway `0.0.0.0` bind is explicitly documented/suppressed
 - pip-audit: passed, no known vulnerabilities in production requirements
-- Mypy: core configuration, models, parser, storage, repositories, services, panel lifecycle, UI and presentation modules passed; the new panel handler module also passed independently
-- Callback contract audit: all baseline admin, Watchlist-handler and guard expressions remain; the one intentionally removed UI expression is the now-forbidden privacy button, whose legacy handler remains registered and rejects private mode
-- Representative rendering audit: the previous 29 screens remain valid, and 8 new community/alphabet/post-delivery screens passed Telegram HTML, text/button length, callback-size, style-value, and no-custom-emoji checks
+- Mypy: core configuration, models, parser, storage, repositories, services, panel lifecycle, UI, presentation and command modules passed; the panel handler module also passed independently with imported handler modules skipped because Aiogram runtime narrowing is not represented statically
+- Command/callback audit: only hidden `/start`, visible `/dashboard`, and hidden owner `/index` command handlers remain; new callbacks are bounded to Telegram's 64-byte limit and legacy privacy callbacks remain safe for historical cards
+- Representative rendering audit: custom batches at the 25-title/160-character boundary and the expanded picker passed Telegram text/button length, callback-size, HTML escaping, style-value and no-custom-emoji checks
 - Placeholder scan: no TODO/FIXME/XXX/HACK/NotImplemented markers
 - Secret and sensitive-file scans: clean
 
@@ -97,8 +102,9 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Six separate `Operation Safed Sagar ... S01E01`–`S01E06` messages, including filename-style labels and forwarding warnings, grouping as one title with six files
 - Idempotent repair of a persisted six-title/six-file snapshot into one title/six files while preserving Telegram file IDs and source message references
 - Corrected File Database repair cards using one shared content ID
-- Manual-title and existing-catalog Watchlist panel flows with dynamic category selection
-- Public read-only community lists, editable display names, always-public enforcement, and bounded callback data
+- Custom multi-title and existing-catalog Watchlist panel flows with dynamic category selection
+- Custom batch normalization/deduplication, preview ticks, 25-title/160-character bounds, duplicate updates, one-commit insertion and failed-commit rollback
+- Public read-only community lists, user/owner editable display names, owner reset/audit, always-public enforcement, and bounded callback data
 - Legacy watchlist schema migration and idempotent rekeying
 - Owner title removal deleting all catalog files, preserving unrelated watchlists, and blocking old-source re-indexing
 - Failed Telegram source deletion remaining safely tombstoned, retry succeeding, and manual cleanup confirmation
@@ -116,17 +122,19 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Non-owner rejection at the Admin Control Center handler even when a valid dashboard message is supplied
 - Legacy dashboard callback contracts continuing alongside the new panel routes, except the intentionally removed privacy button; its callback handler remains safe for old cards
 - Watchlist-library pagination, alphabetical ordering, A–Z/# picker contents and direct filtering
-- Tick selection surviving alphabet changes and bulk status insertion from the dedicated Watchlist add flow
+- In-category search, unsaved-only filtering, Select Page, Clear Selection and selected-only review
+- Tick selection surviving filter changes and bulk status insertion from the dedicated Watchlist add flow
 - Community display-name editing, length validation, HTML escaping and username retention
 - Schema-v4 conversion of previously private Watchlists to always-public state
 - Successful media delivery replacing the old workspace with one new dashboard below the file while preserving the pinned dashboard
+- Dashboard-only command registration, emergency repost retirement of the old pinned card, and failed-snapshot rollback without losing the previous dashboard reference
 
 ## Honest remaining limits
 
 - A real end-to-end Telegram and Railway smoke test still requires the owner's bot token, owner ID, private channel IDs and Railway domain. Those secrets were not available during this audit.
 - Telegram-only persistence is appropriate for the stated 40–50-user scale, not high-write public scale.
 - The five-minute timers are intentionally in-process. Workspace message IDs are persisted, and every restart attempts to delete or disable those stale cards before clearing their references rather than trying to resume uncertain pre-restart deadlines.
-- Dashboard pinning is attempted through the Bot API and retried by `/start`; if Telegram denies pinning for a particular client/chat state, the dashboard still works as a normal bot message and the event is logged.
+- Dashboard pinning is attempted through the Bot API. Hidden `/start` recovers onboarding/deep-link dashboards, while `/dashboard` deliberately reposts the emergency replacement; if Telegram denies replacement pinning, an existing tracked dashboard is preserved.
 - The standard Bot API cannot scan arbitrary old channel history; `/index` is required for missed old posts.
 - Telegram normally limits bot message deletion to messages sent within 48 hours. Older source posts require manual owner deletion; catalog tombstones still block delivery and re-indexing immediately.
 - Telegram protected content blocks normal official-client forwarding/saving but is not absolute DRM against modified clients or external capture.

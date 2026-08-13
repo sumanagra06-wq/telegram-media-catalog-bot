@@ -114,6 +114,51 @@ class PanelManager:
             LOGGER.warning("Could not pin dashboard for user %s", user_id)
         return message_id
 
+    async def repost_dashboard(
+        self,
+        *,
+        user_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup,
+    ) -> int:
+        """Post a fresh pinned dashboard and retire the previous dashboard card."""
+        async with self._user_lock(user_id):
+            profile = self.users.get_user(user_id)
+            if profile is None:
+                raise ValueError("User not found")
+            previous_id = profile.panel_dashboard_message_id
+            message = await self.bot.send_message(user_id, text, reply_markup=reply_markup)
+            message_id = message.message_id
+            pinned = True
+            try:
+                await self.bot.pin_chat_message(
+                    user_id,
+                    message_id,
+                    disable_notification=True,
+                )
+            except TelegramAPIError:
+                pinned = False
+                LOGGER.warning("Could not pin replacement dashboard for user %s", user_id)
+            if not pinned and previous_id is not None:
+                with suppress(TelegramBadRequest, TelegramForbiddenError):
+                    await self.bot.delete_message(user_id, message_id)
+                return previous_id
+            try:
+                await self.users.set_panel_dashboard_message(user_id, message_id)
+            except StorageError:
+                if pinned:
+                    with suppress(TelegramAPIError):
+                        await self.bot.unpin_chat_message(user_id, message_id=message_id)
+                with suppress(TelegramBadRequest, TelegramForbiddenError):
+                    await self.bot.delete_message(user_id, message_id)
+                raise
+            if previous_id is not None and previous_id != message_id:
+                with suppress(TelegramAPIError):
+                    await self.bot.unpin_chat_message(user_id, message_id=previous_id)
+                with suppress(TelegramBadRequest, TelegramForbiddenError):
+                    await self.bot.delete_message(user_id, previous_id)
+            return message_id
+
     async def render_workspace(
         self,
         *,

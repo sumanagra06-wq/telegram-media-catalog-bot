@@ -19,7 +19,9 @@ from app.handlers.watchlist import (
     catalog_title_selected,
     manual_category_selected,
     manual_status_selected,
+    manual_title_continue,
     manual_title_received,
+    manual_title_toggle,
     shared_watchlist,
     update_entry_status,
 )
@@ -205,6 +207,9 @@ async def test_manual_and_catalog_watchlist_panel_flows_and_public_read_only_vie
 
     title_message = FakeMessage(owner, "Arrival")
     await manual_title_received(title_message, manual_state)
+    assert manual_state.value == WatchlistAddState.manual_title
+    continue_callback = FakeCallback(owner, "wct:continue")
+    await manual_title_continue(continue_callback, manual_state)
     assert manual_state.value == WatchlistAddState.manual_status
     status_callback = FakeCallback(owner, "wams:c")
     await manual_status_selected(status_callback, users, catalog, _config(), manual_state)
@@ -251,6 +256,51 @@ async def test_manual_and_catalog_watchlist_panel_flows_and_public_read_only_vie
     assert "Alice’s watchlist" in public_attempt.message.edits[-1][0]
     assert users.get_user(owner.id).watchlist_public is True
     assert len(users.get_user(owner.id).watchlist) == 2
+
+
+async def test_custom_watchlist_batch_preview_ticks_and_atomic_commit():
+    catalog, users = await _repositories()
+    category = await catalog.add_category("Movies", -10010, "Movies")
+    user = _user(42, "Alice")
+    await _register(users, user)
+    state = FakeState()
+    await manual_category_selected(
+        FakeCallback(user, f"wamc:{category.id}"),
+        users,
+        catalog,
+        _config(),
+        state,
+    )
+    message = FakeMessage(user, "Arrival\nDune\n arrival \n\n")
+    await manual_title_received(message, state)
+    assert state.data["titles"] == ["Arrival", "Dune"]
+    assert state.data["selected_indices"] == [0, 1]
+    preview_buttons = [
+        button for row in message.answers[-1][1]["reply_markup"].inline_keyboard for button in row
+    ]
+    assert any(button.text == "Continue with 2 ›" for button in preview_buttons)
+
+    await manual_title_toggle(FakeCallback(user, "wctp:1"), state)
+    assert state.data["selected_indices"] == [0]
+    await manual_title_continue(FakeCallback(user, "wct:continue"), state)
+    await manual_status_selected(
+        FakeCallback(user, "wams:t"),
+        users,
+        catalog,
+        _config(),
+        state,
+    )
+    profile = users.get_user(user.id)
+    assert {(entry.title, entry.status) for entry in profile.watchlist.values()} == {
+        ("Arrival", WatchStatus.TO_WATCH)
+    }
+
+    too_many = FakeState()
+    too_many.value = WatchlistAddState.manual_title
+    oversized = FakeMessage(user, "\n".join(f"Title {index}" for index in range(26)))
+    await manual_title_received(oversized, too_many)
+    assert "no more than 25" in oversized.answers[-1][0]
+    assert too_many.data == {}
 
 
 async def test_new_storage_categories_require_delete_messages_permission():
