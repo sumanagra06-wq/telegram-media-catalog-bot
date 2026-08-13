@@ -208,8 +208,8 @@ Open Dashboard → Watchlist. The panel supports:
 
 1. **From catalog** — choose any enabled dynamic category; search/filter or browse alphabetically; jump by initial; select a page, clear, or review ticks; and assign one status to up to 25 selected titles.
 2. **Custom batch** — choose a dynamic category, paste up to 25 titles (one per line, 160 characters each), review/tick the normalized deduplicated preview, and choose one status for one atomic commit.
-3. **My titles** — view entries, change status, remove an entry, or open its catalog page when one is linked and still available.
-4. **Community lists** — browse other active users' Watchlists read-only. Shared viewers cannot change or remove another user's entries.
+3. **My titles** — every list card shows its explicit To Watch, On Hold, or Completed status and category before the title; open an entry to change status, remove it, or open its linked catalog page.
+4. **Community lists** — browse other active users' Watchlists read-only with the same per-title status and category labels. Shared viewers cannot change or remove another user's entries.
 5. **Community name** — choose a display name up to 40 characters without changing the Telegram profile; the real `@username` remains visible in the directory when available. Owners can edit or reset any user's Community name from Admin Control Center → Users.
 
 Community Watchlists are always public to other active bot users and cannot be made private. The previous privacy callback remains safely handled for old cards but rejects private-mode requests. A catalog title removed by the owner remains as a text-only Watchlist entry; catalog removal does not edit personal Watchlists.

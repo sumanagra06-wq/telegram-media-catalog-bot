@@ -119,7 +119,22 @@ def test_watchlist_panel_callbacks_are_bounded_and_shared_details_are_read_only(
     assert callbacks
     assert all(len(value.encode("utf-8")) <= 64 for value in callbacks)
 
-    shared_markup = watchlist_entry_detail(entry, owner, own=False, content_available=True)[1]
+    own_text, own_list_markup = watchlist_entries(owner, [entry], 0, own=True)
+    shared_text, shared_list_markup = watchlist_entries(owner, [entry], 0, own=False)
+    for text, markup in ((own_text, own_list_markup), (shared_text, shared_list_markup)):
+        labels = [button.text for row in markup.inline_keyboard for button in row]
+        assert "🕓 To Watch • 🗂 Movies" in labels
+        assert "🎞 Interstellar" in labels
+        assert "🕓 To Watch: <b>1</b>" in text
+        assert "🗂 Category shown per title" in text
+
+    own_detail_text, _ = watchlist_entry_detail(entry, owner, own=True, content_available=True)
+    shared_detail_text, shared_markup = watchlist_entry_detail(
+        entry, owner, own=False, content_available=True
+    )
+    for text in (own_detail_text, shared_detail_text):
+        assert "<b>Category</b>  •  Movies" in text
+        assert "<b>Status</b>  •  🕓 To Watch" in text
     shared_callbacks = _callbacks(shared_markup)
     assert not any(value.startswith(("wlu:", "wld:")) for value in shared_callbacks)
 

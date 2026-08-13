@@ -1091,7 +1091,17 @@ def watchlist_entries(
         )
         builder.row(
             InlineKeyboardButton(
-                text=compact_label(f"{_watch_status_label(entry.status)} • {entry.title}", 58),
+                text=compact_label(
+                    f"{_watch_status_label(entry.status)} • 🗂 {entry.category_name}",
+                    58,
+                ),
+                callback_data=callback_data,
+                style="success" if entry.status == WatchStatus.COMPLETED else None,
+            )
+        )
+        builder.row(
+            InlineKeyboardButton(
+                text=compact_label(f"🎞 {entry.title}", 58),
                 callback_data=callback_data,
                 style="primary",
             )
@@ -1127,9 +1137,10 @@ def watchlist_entries(
         f"📚 <b>{safe_html(name)}</b>\n"
         f"<blockquote>{len(entries)} saved title{'s' if len(entries) != 1 else ''}</blockquote>\n"
         f"{DIVIDER}\n"
-        f"🕓 {status_counts[WatchStatus.TO_WATCH]}  •  "
-        f"⏸ {status_counts[WatchStatus.ON_HOLD]}  •  "
-        f"✅ {status_counts[WatchStatus.COMPLETED]}\n"
+        f"🕓 To Watch: <b>{status_counts[WatchStatus.TO_WATCH]}</b>  •  "
+        f"⏸ On Hold: <b>{status_counts[WatchStatus.ON_HOLD]}</b>\n"
+        f"✅ Completed: <b>{status_counts[WatchStatus.COMPLETED]}</b>  •  "
+        "🗂 Category shown per title\n"
         f"{_page_line(page, pages)}"
     )
     if not entries:

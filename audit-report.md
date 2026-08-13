@@ -16,6 +16,7 @@ This report records checks performed before packaging. It is not a claim that li
 - Alphabetical Watchlist-library browsing, in-category search, unsaved filtering, A–Z/# jumps, pagination, Select Page/Clear/review power tools, persistent ticks and atomic status insertion
 - Custom Watchlist batches of up to 25 normalized/deduplicated titles, preview ticks, one status, and one atomic commit
 - Always-public community Watchlists with editable, HTML-safe display names and visible usernames, including owner edit/reset moderation
+- Explicit status and dynamic-category labels on every own/shared Watchlist title card and detail screen
 - Post-delivery workspace replacement below protected media without leaving two active workspaces
 - Unified owner dashboard with an authorization-checked Admin Control Center entry
 - Semantic Bot API button styles (`primary`, `success`, `danger`) with neutral secondary actions
@@ -56,6 +57,7 @@ This report records checks performed before packaging. It is not a claim that li
 21. Strengthened the Watchlist library picker without replacing its alphabetical model: in-category search, unsaved-only filtering, Select Page, Clear Selection and selected-only review now compose with pagination, A–Z/`#`, saved markers, the 25-title bound and atomic bulk insertion.
 22. Added owner moderation of another user's public Community display name from User Management, including edit, reset-to-Telegram-name, validation, escaped rendering and catalog audit events. Telegram profile fields and mandatory-public visibility remain unchanged.
 23. Declared the dashboard final: removed legacy user/admin command handlers and command-menu entries, retained hidden Telegram `/start` onboarding/deep links and owner reply-based `/index`, and exposed only `/dashboard`. The emergency action posts and pins a fresh dashboard, retires the old card, and rolls back safely if snapshot persistence fails.
+24. Reworked own and Community Watchlist title cards into a two-line identity: an explicit To Watch/On Hold/Completed status plus dynamic category label, followed by the title. Both own and read-only shared detail screens retain the same category/status fields, preventing movie, series and future categories from appearing ambiguous.
 
 ## Automated results at package time
 
@@ -105,6 +107,7 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Custom multi-title and existing-catalog Watchlist panel flows with dynamic category selection
 - Custom batch normalization/deduplication, preview ticks, 25-title/160-character bounds, duplicate updates, one-commit insertion and failed-commit rollback
 - Public read-only community lists, user/owner editable display names, owner reset/audit, always-public enforcement, and bounded callback data
+- Matching own/shared Watchlist title cards with explicit status/category metadata and read-only shared details
 - Legacy watchlist schema migration and idempotent rekeying
 - Owner title removal deleting all catalog files, preserving unrelated watchlists, and blocking old-source re-indexing
 - Failed Telegram source deletion remaining safely tombstoned, retry succeeding, and manual cleanup confirmation
