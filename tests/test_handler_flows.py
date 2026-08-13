@@ -115,7 +115,17 @@ async def test_plain_search_to_episode_delivery_flow():
             "chat_id": 42,
             "from_chat_id": -10010,
             "message_id": 55,
-            "caption": ("📺 <b>Dark</b>\nSeason 1 • Episode 1\nLanguage: Hindi\nQuality: 1080p"),
+            "caption": (
+                "📺 <b>Dark</b>\n"
+                "<blockquote>Series delivery • protected file</blockquote>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "▶️ <b>Episode</b>  •  Season 1, Episode 1\n"
+                "📅 <b>Year</b>  •  Unknown\n"
+                "🗣 <b>Language</b>  •  Hindi\n"
+                "💎 <b>Quality</b>  •  1080p\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "🔐 Delivered with Telegram content protection."
+            ),
             "parse_mode": "HTML",
             "protect_content": True,
         }

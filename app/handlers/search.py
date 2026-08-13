@@ -54,10 +54,16 @@ async def plain_title_search(
         return
     raw_query = " ".join((message.text or "").split()).strip()
     if len(raw_query) < 2:
-        await message.answer("Please type at least two characters of the title.")
+        await message.answer(
+            "🔎 <b>SEARCH NEEDS A LITTLE MORE</b>\n"
+            "Please type at least two characters from the title."
+        )
         return
     if len(raw_query) > 100:
-        await message.answer("The search text is too long. Please send only the title.")
+        await message.answer(
+            "✂️ <b>SEARCH IS TOO LONG</b>\n"
+            "Send only the movie or series title, optionally followed by its year."
+        )
         return
     hits = query.search(raw_query)
     if not hits:
@@ -243,11 +249,16 @@ async def _deliver_file(
 ) -> None:
     record = catalog.get_file(file_id)
     if record is None or not record.available:
-        await callback.message.answer("This file is currently unavailable.")
+        await callback.message.answer(
+            "⚠️ <b>FILE UNAVAILABLE</b>\n"
+            "This version cannot be delivered right now. Please choose another available file."
+        )
         return
     content = catalog.get_content(record.content_id)
     if content is None:
-        await callback.message.answer("This title is currently unavailable.")
+        await callback.message.answer(
+            "⚠️ <b>TITLE UNAVAILABLE</b>\nThis title is no longer in the delivery catalog."
+        )
         return
     try:
         await bot.copy_message(
@@ -265,7 +276,10 @@ async def _deliver_file(
         message = str(exc).casefold()
         source_missing = "message to copy not found" in message or "message_id_invalid" in message
         if not source_missing:
-            await callback.message.answer("Telegram could not send this file. Please try again.")
+            await callback.message.answer(
+                "⚠️ <b>DELIVERY INTERRUPTED</b>\n"
+                "Telegram could not send this file. Please wait a moment and try again."
+            )
             return
 
         # Telegram file IDs provide a server-side fallback without downloading or re-uploading
@@ -285,14 +299,18 @@ async def _deliver_file(
         except (TelegramBadRequest, TelegramForbiddenError):
             await catalog.mark_file_available(file_id, False)
             await callback.message.answer(
-                "This file is no longer available. The owner has been notified."
+                "❌ <b>FILE NO LONGER AVAILABLE</b>\n"
+                "The broken version was hidden from delivery and the owner was notified."
             )
             for owner_id in config.owner_ids:
                 try:
                     await bot.send_message(
                         owner_id,
-                        f"⚠️ Source file unavailable\n\nFile: <code>{file_id}</code>\n"
-                        f"Title: {safe_html(record.title)}",
+                        "⚠️ <b>SOURCE FILE UNAVAILABLE</b>\n"
+                        "<blockquote>Automatic delivery failed and the file was hidden.</blockquote>\n"
+                        "━━━━━━━━━━━━━━━━━━\n"
+                        f"🆔 <b>File</b>  •  <code>{file_id}</code>\n"
+                        f"🎬 <b>Title</b>  •  {safe_html(record.title)}",
                     )
                 except (TelegramBadRequest, TelegramForbiddenError):
                     LOGGER.info("Could not notify owner %s about unavailable file", owner_id)

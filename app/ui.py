@@ -4,7 +4,7 @@ import math
 from collections.abc import Sequence
 from typing import TypeVar
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .models import (
@@ -18,6 +18,7 @@ from .models import (
     WatchlistEntry,
     WatchStatus,
 )
+from .presentation import ActionButton as InlineKeyboardButton
 from .services import CatalogQueryService, SearchSession, variant_label
 from .utils import compact_label, safe_html
 
@@ -28,6 +29,12 @@ WATCH_CODES = {
 }
 CODE_WATCH = {value: key for key, value in WATCH_CODES.items()}
 ItemT = TypeVar("ItemT")
+DIVIDER = "━━━━━━━━━━━━━━━━━━"
+
+
+def _page_line(page: int, pages: int, total: int | None = None) -> str:
+    total_text = f"  •  {total} items" if total is not None else ""
+    return f"<code>Page {page + 1}/{pages}</code>{total_text}"
 
 
 def page_slice(values: Sequence[ItemT], page: int, page_size: int) -> tuple[list[ItemT], int, int]:
@@ -37,41 +44,64 @@ def page_slice(values: Sequence[ItemT], page: int, page_size: int) -> tuple[list
     return list(values[start : start + page_size]), page, pages
 
 
-def main_dashboard(is_owner: bool) -> tuple[str, InlineKeyboardMarkup]:
+def main_dashboard(
+    is_owner: bool, first_name: str | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
+    greeting = f", {safe_html(first_name)}" if first_name else ""
     text = (
-        "🎬 <b>Media Library</b>\n\n"
-        "Send the name of any movie or series.\n\n"
-        "Examples: <code>Dark</code>, <code>Dune</code>, "
-        "<code>Interstellar 2014</code>"
+        "✨ <b>MEDIA LIBRARY</b>\n"
+        "<blockquote>Your private cinema, organized and ready.</blockquote>\n"
+        f"👋 <b>Welcome{greeting}</b>\n\n"
+        f"{DIVIDER}\n"
+        "🔎 <b>Instant title search</b>\n"
+        "Send any movie or series name directly in this chat.\n\n"
+        "💡 <b>Try:</b> <code>Dark</code>  •  <code>Dune</code>  •  "
+        "<code>Interstellar 2014</code>\n"
+        f"{DIVIDER}\n"
+        "🔐 Files are delivered with Telegram content protection."
     )
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="🔎 Search help", callback_data="menu:search"),
-        InlineKeyboardButton(text="🗂 Browse", callback_data="menu:browse"),
+        InlineKeyboardButton(text="🔎 Search", callback_data="menu:search", style="primary"),
+        InlineKeyboardButton(text="🗂 Browse library", callback_data="menu:browse"),
     )
     builder.row(
-        InlineKeyboardButton(text="🆕 Recently added", callback_data="menu:recent"),
-        InlineKeyboardButton(text="📚 My watchlist", callback_data="menu:watchlist"),
+        InlineKeyboardButton(text="✨ Recently added", callback_data="menu:recent"),
+        InlineKeyboardButton(text="📚 Watchlist", callback_data="menu:watchlist", style="primary"),
     )
-    builder.row(InlineKeyboardButton(text="❓ Help", callback_data="menu:help"))
+    builder.row(InlineKeyboardButton(text="❓ Help & tips", callback_data="menu:help"))
     if is_owner:
-        builder.row(InlineKeyboardButton(text="🛡 Admin panel", callback_data="admin:home"))
+        builder.row(
+            InlineKeyboardButton(
+                text="🛡 Open admin control center",
+                callback_data="admin:home",
+                style="primary",
+            )
+        )
     return text, builder.as_markup()
 
 
 def browse_categories(categories: list[Category]) -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
+    icons = {"single": "🎬", "episodic": "📺", "mixed": "🗂"}
     for category in categories:
         builder.row(
             InlineKeyboardButton(
-                text=f"🗂 {compact_label(category.name)}",
+                text=f"{icons[category.mode.value]} {compact_label(category.name)}",
                 callback_data=f"browse:{category.id}",
+                style="primary",
             )
         )
     builder.row(InlineKeyboardButton(text="🏠 Main menu", callback_data="menu:home"))
-    text = "🗂 <b>Browse library</b>\n\nChoose a category:"
+    text = (
+        "🗂 <b>BROWSE THE LIBRARY</b>\n"
+        "<blockquote>Explore the library one collection at a time.</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"📚 Available collections: <b>{len(categories)}</b>\n\n"
+        "Choose where you want to explore:"
+    )
     if not categories:
-        text += "\n\nNo categories are currently available."
+        text += "\n\n🫙 <i>No collections are available yet.</i>"
     return text, builder.as_markup()
 
 
@@ -80,16 +110,23 @@ def search_results(
     contents: list[ContentRecord],
     page: int,
     page_size: int = 4,
+    *,
+    heading: str = "SEARCH RESULTS",
+    prompt: str = "Tap the best match below:",
 ) -> tuple[str, InlineKeyboardMarkup]:
     visible, page, pages = page_slice(contents, page, page_size)
+    if heading == "SEARCH RESULTS" and session.query == "Recently added":
+        heading = "RECENTLY ADDED"
+        prompt = "Fresh arrivals—choose a title to view its details:"
     builder = InlineKeyboardBuilder()
-    for content in visible:
+    for rank, content in enumerate(visible, start=page * page_size + 1):
         icon = "📺" if content.kind == ContentKind.SERIES else "🎬"
-        year = f" ({content.year})" if content.year else ""
+        year = f" ({content.year or 'Unknown'})"
         builder.row(
             InlineKeyboardButton(
-                text=compact_label(f"{icon} {content.title}{year}", 58),
+                text=compact_label(f"{rank}. {icon} {content.title}{year}", 58),
                 callback_data=f"ct:{content.id}:{session.token}:{page}",
+                style="primary",
             )
         )
     navigation: list[InlineKeyboardButton] = []
@@ -105,17 +142,30 @@ def search_results(
         builder.row(*navigation)
     builder.row(InlineKeyboardButton(text="🏠 Main menu", callback_data="menu:home"))
     text = (
-        f"🔎 <b>Results for “{safe_html(session.query)}”</b>\n\n"
-        f"Select a title. Page {page + 1} of {pages}."
+        f"🔎 <b>{safe_html(heading)}</b>\n"
+        f"<blockquote>Results for “{safe_html(session.query)}”</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🎯 Showing <b>{len(contents)}</b> title{'s' if len(contents) != 1 else ''}\n"
+        f"{_page_line(page, pages)}\n\n"
+        f"{safe_html(prompt)}"
     )
     return text, builder.as_markup()
 
 
 def no_results(query: str) -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🔎 Try another search", callback_data="menu:search"),
+        InlineKeyboardButton(text="🗂 Browse instead", callback_data="menu:browse"),
+    )
     builder.row(InlineKeyboardButton(text="🏠 Main menu", callback_data="menu:home"))
     return (
-        (f"No titles matched <b>{safe_html(query)}</b>.\n\nTry fewer words or check the spelling."),
+        (
+            "🔍 <b>NO MATCH FOUND</b>\n"
+            f"<blockquote>“{safe_html(query)}”</blockquote>\n"
+            f"{DIVIDER}\n"
+            "🪄 Try fewer words, remove the year, or check the spelling."
+        ),
         builder.as_markup(),
     )
 
@@ -130,20 +180,36 @@ def content_screen(
 ) -> tuple[str, InlineKeyboardMarkup]:
     languages, qualities = query.aggregates(content.id)
     icon = "📺" if content.kind == ContentKind.SERIES else "🎬"
-    year = f" ({content.year})" if content.year else ""
-    lines = [f"{icon} <b>{safe_html(content.title)}{year}</b>", ""]
-    lines.append(f"Category: {safe_html(category.name)}")
-    lines.append("Language: " + safe_html(", ".join(languages) if languages else "Unknown"))
-    lines.append("Quality: " + safe_html(", ".join(qualities) if qualities else "Unknown"))
+    kind_label = "Series" if content.kind == ContentKind.SERIES else "Movie"
+    language_text = safe_html(", ".join(languages) if languages else "Unknown")
+    quality_text = safe_html(", ".join(qualities) if qualities else "Unknown")
+    lines = [
+        f"{icon} <b>{safe_html(content.title)}</b>",
+        f"<blockquote>{kind_label} details and available files</blockquote>",
+        DIVIDER,
+        f"🗂 <b>Category</b>  •  {safe_html(category.name)}",
+        f"📅 <b>Year</b>  •  {content.year or 'Unknown'}",
+        f"🗣 <b>Language</b>  •  {language_text}",
+        f"💎 <b>Quality</b>  •  {quality_text}",
+    ]
 
     builder = InlineKeyboardBuilder()
     if content.kind == ContentKind.SERIES:
         seasons = query.seasons(content.id)
-        lines.append(f"Available seasons: {len(seasons)}")
+        if seasons:
+            lines.extend(
+                [
+                    DIVIDER,
+                    f"📚 <b>{len(seasons)} season{'s' if len(seasons) != 1 else ''} available</b>",
+                ]
+            )
+        else:
+            lines.extend([DIVIDER, "🫙 <i>No seasons are available right now.</i>"])
         buttons = [
             InlineKeyboardButton(
-                text=f"Season {season}",
+                text=f"📺 Season {season}",
                 callback_data=f"se:{content.id}:{season}:{back_token}:{back_page}",
+                style="primary",
             )
             for season in seasons
         ]
@@ -151,17 +217,25 @@ def content_screen(
             builder.row(*buttons[index : index + 2])
     else:
         variants = query.movie_variants(content.id)
-        if len(variants) == 1:
+        if not variants:
+            lines.extend([DIVIDER, "🫙 <i>No files are available right now.</i>"])
+        elif len(variants) == 1:
+            lines.extend([DIVIDER, "✅ <b>Ready for protected delivery</b>"])
             builder.row(
-                InlineKeyboardButton(text="▶️ Get file", callback_data=f"fl:{variants[0].id}")
+                InlineKeyboardButton(
+                    text="▶️ Get protected file",
+                    callback_data=f"fl:{variants[0].id}",
+                    style="success",
+                )
             )
         else:
-            lines.append(f"Available versions: {len(variants)}")
+            lines.extend([DIVIDER, f"🎞 <b>{len(variants)} versions available</b>"])
             for item in variants:
                 builder.row(
                     InlineKeyboardButton(
-                        text=compact_label(variant_label(item), 58),
+                        text=compact_label(f"▶️ {variant_label(item)}", 58),
                         callback_data=f"fl:{item.id}",
+                        style="success",
                     )
                 )
 
@@ -189,8 +263,9 @@ def season_screen(
     builder = InlineKeyboardBuilder()
     episode_buttons = [
         InlineKeyboardButton(
-            text=f"E{episode:02d}",
+            text=f"▶️ E{episode:02d}",
             callback_data=f"ep:{content.id}:{season}:{episode}:{token}:{result_page}",
+            style="primary",
         )
         for episode in visible
     ]
@@ -201,8 +276,9 @@ def season_screen(
     if pack_parts:
         builder.row(
             InlineKeyboardButton(
-                text="📦 Complete Season Pack",
+                text="📦 Download complete season pack",
                 callback_data=f"pk:{content.id}:{season}:{token}:{result_page}",
+                style="success",
             )
         )
     navigation: list[InlineKeyboardButton] = []
@@ -228,11 +304,27 @@ def season_screen(
         ),
         InlineKeyboardButton(text="🏠 Home", callback_data="menu:home"),
     )
-    text = f"📺 <b>{safe_html(content.title)}</b>\nSeason {season}\n\nChoose an episode:"
+    text = (
+        f"📺 <b>{safe_html(content.title)}</b>\n"
+        f"<blockquote>Season {season} • choose what to watch</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🎞 Episodes available: <b>{len(episodes)}</b>\n"
+        f"{_page_line(episode_page, pages)}\n\n"
+        "Tap an episode to receive it:"
+    )
     if not episodes and pack_parts:
         text = (
-            f"📺 <b>{safe_html(content.title)}</b>\nSeason {season}\n\n"
-            "Individual episodes are unavailable; use the season pack."
+            f"📺 <b>{safe_html(content.title)}</b>\n"
+            f"<blockquote>Season {season}</blockquote>\n"
+            f"{DIVIDER}\n"
+            "📦 Individual episodes are unavailable, but the complete season pack is ready."
+        )
+    elif not episodes:
+        text = (
+            f"📺 <b>{safe_html(content.title)}</b>\n"
+            f"<blockquote>Season {season}</blockquote>\n"
+            f"{DIVIDER}\n"
+            "🫙 <i>No episodes or season packs are available right now.</i>"
         )
     return text, builder.as_markup()
 
@@ -249,7 +341,9 @@ def variants_screen(
     for item in variants:
         builder.row(
             InlineKeyboardButton(
-                text=compact_label(variant_label(item), 58), callback_data=f"fl:{item.id}"
+                text=compact_label(f"▶️ {variant_label(item)}", 58),
+                callback_data=f"fl:{item.id}",
+                style="success",
             )
         )
     builder.row(
@@ -261,7 +355,10 @@ def variants_screen(
     return (
         (
             f"📺 <b>{safe_html(content.title)}</b>\n"
-            f"Season {season} • Episode {episode}\n\nChoose a version:"
+            f"<blockquote>Season {season} • Episode {episode}</blockquote>\n"
+            f"{DIVIDER}\n"
+            f"🎞 Available versions: <b>{len(variants)}</b>\n\n"
+            "Choose your preferred language and quality:"
         ),
         builder.as_markup(),
     )
@@ -278,7 +375,11 @@ def pack_screen(
     for item in parts:
         label = f"📦 Part {item.pack_part or 1} • {variant_label(item)}"
         builder.row(
-            InlineKeyboardButton(text=compact_label(label, 58), callback_data=f"fl:{item.id}")
+            InlineKeyboardButton(
+                text=compact_label(label, 58),
+                callback_data=f"fl:{item.id}",
+                style="success",
+            )
         )
     builder.row(
         InlineKeyboardButton(
@@ -288,7 +389,10 @@ def pack_screen(
     )
     return (
         (
-            f"📦 <b>{safe_html(content.title)} — Season {season} Pack</b>\n\n"
+            f"📦 <b>{safe_html(content.title)}</b>\n"
+            f"<blockquote>Season {season} • complete pack</blockquote>\n"
+            f"{DIVIDER}\n"
+            f"🧩 Archive parts: <b>{len(parts)}</b>\n\n"
             "Download every part before extracting the archive:"
         ),
         builder.as_markup(),
@@ -297,25 +401,36 @@ def pack_screen(
 
 def watchlist_home(user: UserProfile) -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="➕ Add title", callback_data="wla:start"))
     builder.row(
-        InlineKeyboardButton(text=f"📚 My titles — {len(user.watchlist)}", callback_data="wlm:0"),
-        InlineKeyboardButton(text="🌐 Community lists", callback_data="wlp:0"),
+        InlineKeyboardButton(text="➕ Add a title", callback_data="wla:start", style="success")
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=f"📚 My titles · {len(user.watchlist)}",
+            callback_data="wlm:0",
+            style="primary",
+        ),
+        InlineKeyboardButton(text="🌐 Community", callback_data="wlp:0", style="primary"),
     )
     builder.row(
         InlineKeyboardButton(
             text="🔒 Make my list private" if user.watchlist_public else "🌐 Share my list",
             callback_data=f"wlvis:{0 if user.watchlist_public else 1}",
+            style=None if user.watchlist_public else "success",
         )
     )
     builder.row(InlineKeyboardButton(text="🏠 Main menu", callback_data="menu:home"))
-    visibility = "Public to active bot users" if user.watchlist_public else "Private"
+    visibility_icon = "🌐" if user.watchlist_public else "🔒"
+    visibility = "Shared with active users" if user.watchlist_public else "Private"
     return (
         (
-            "📚 <b>Watchlist</b>\n\n"
-            f"Saved titles: {len(user.watchlist)}\n"
-            f"Visibility: {visibility}\n\n"
-            "Add an indexed catalog title or keep any custom title manually."
+            "📚 <b>MY WATCHLIST</b>\n"
+            "<blockquote>Plan it. Pause it. Complete it.</blockquote>\n"
+            f"{DIVIDER}\n"
+            f"🎞 Saved titles  •  <b>{len(user.watchlist)}</b>\n"
+            f"{visibility_icon} Visibility  •  <b>{visibility}</b>\n"
+            f"{DIVIDER}\n"
+            "Add an indexed title or save anything manually."
         ),
         builder.as_markup(),
     )
@@ -324,11 +439,25 @@ def watchlist_home(user: UserProfile) -> tuple[str, InlineKeyboardMarkup]:
 def watchlist_add_method() -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="🎞 From catalog", callback_data="wla:catalog"),
-        InlineKeyboardButton(text="✍️ Manual title", callback_data="wla:manual"),
+        InlineKeyboardButton(
+            text="🎞 Choose from the library", callback_data="wla:catalog", style="primary"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="✍️ Add a custom title", callback_data="wla:manual", style="primary"
+        )
     )
     builder.row(InlineKeyboardButton(text="◀️ Watchlist", callback_data="menu:watchlist"))
-    return "➕ <b>Add title</b>\n\nChoose how to add it:", builder.as_markup()
+    return (
+        (
+            "➕ <b>ADD TO WATCHLIST</b>\n"
+            "<blockquote>Save something from the library or type your own.</blockquote>\n"
+            f"{DIVIDER}\n"
+            "How would you like to add it?"
+        ),
+        builder.as_markup(),
+    )
 
 
 def watchlist_category_picker(
@@ -340,12 +469,18 @@ def watchlist_category_picker(
             InlineKeyboardButton(
                 text=f"🗂 {compact_label(category.name)}",
                 callback_data=f"{callback_prefix}:{category.id}",
+                style="primary",
             )
         )
     builder.row(InlineKeyboardButton(text="◀️ Add title", callback_data="wla:start"))
-    text = f"➕ <b>{safe_html(heading)}</b>\n\nChoose a category:"
+    text = (
+        f"🗂 <b>{safe_html(heading.upper())}</b>\n"
+        "<blockquote>Step 1 of 3 • choose a collection</blockquote>\n"
+        f"{DIVIDER}\n"
+        "Where does this title belong?"
+    )
     if not categories:
-        text += "\n\nNo enabled categories are available."
+        text += "\n\n🫙 <i>No enabled categories are available.</i>"
     return text, builder.as_markup()
 
 
@@ -361,11 +496,17 @@ def watchlist_status_picker(title: str, callback_prefix: str) -> tuple[str, Inli
             InlineKeyboardButton(
                 text=labels[status],
                 callback_data=f"{callback_prefix}:{WATCH_CODES[status]}",
+                style="success" if status == WatchStatus.COMPLETED else "primary",
             )
         )
-    builder.row(InlineKeyboardButton(text="Cancel", callback_data="menu:watchlist"))
+    builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data="menu:watchlist"))
     return (
-        f"➕ <b>{safe_html(title)}</b>\n\nChoose its watchlist status:",
+        (
+            f"➕ <b>{safe_html(title)}</b>\n"
+            "<blockquote>Final step • choose a status</blockquote>\n"
+            f"{DIVIDER}\n"
+            "Where should this title go?"
+        ),
         builder.as_markup(),
     )
 
@@ -396,6 +537,7 @@ def watchlist_entries(
             InlineKeyboardButton(
                 text=compact_label(f"{_watch_status_label(entry.status)} • {entry.title}", 58),
                 callback_data=callback_data,
+                style="primary",
             )
         )
     navigation: list[InlineKeyboardButton] = []
@@ -408,6 +550,12 @@ def watchlist_entries(
         navigation.append(InlineKeyboardButton(text="Next ▶️", callback_data=f"{prefix}:{page + 1}"))
     if navigation:
         builder.row(*navigation)
+    if own and not entries:
+        builder.row(
+            InlineKeyboardButton(
+                text="➕ Add your first title", callback_data="wla:start", style="success"
+            )
+        )
     builder.row(
         InlineKeyboardButton(
             text="◀️ Watchlist" if own else "◀️ Community",
@@ -415,10 +563,21 @@ def watchlist_entries(
         ),
         InlineKeyboardButton(text="🏠 Home", callback_data="menu:home"),
     )
-    name = "My titles" if own else f"{owner.first_name}’s watchlist"
-    text = f"📚 <b>{safe_html(name)}</b>\n\nPage {page + 1} of {pages}"
+    name = "MY TITLES" if own else f"{owner.first_name}’s watchlist"
+    status_counts = {status: 0 for status in WatchStatus}
+    for entry in entries:
+        status_counts[entry.status] += 1
+    text = (
+        f"📚 <b>{safe_html(name)}</b>\n"
+        f"<blockquote>{len(entries)} saved title{'s' if len(entries) != 1 else ''}</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🕓 {status_counts[WatchStatus.TO_WATCH]}  •  "
+        f"⏸ {status_counts[WatchStatus.ON_HOLD]}  •  "
+        f"✅ {status_counts[WatchStatus.COMPLETED]}\n"
+        f"{_page_line(page, pages)}"
+    )
     if not entries:
-        text += "\n\nNo titles have been added."
+        text += "\n\n🫙 <i>No titles here yet. Your next favorite can start here.</i>"
     return text, builder.as_markup()
 
 
@@ -438,15 +597,22 @@ def watchlist_entry_detail(
                 InlineKeyboardButton(
                     text=_watch_status_label(status) + selected,
                     callback_data=f"wlu:{entry.id}:{WATCH_CODES[status]}",
+                    style="success" if entry.status == status else "primary",
                 )
             )
         builder.row(
-            InlineKeyboardButton(text="🗑 Remove from list", callback_data=f"wld:{entry.id}")
+            InlineKeyboardButton(
+                text="🗑 Remove from watchlist",
+                callback_data=f"wld:{entry.id}",
+                style="danger",
+            )
         )
     if content_available and entry.content_id:
         builder.row(
             InlineKeyboardButton(
-                text="🎞 Open catalog title", callback_data=f"ct:{entry.content_id}:0:0"
+                text="🎞 Open in the library",
+                callback_data=f"ct:{entry.content_id}:0:0",
+                style="primary",
             )
         )
     builder.row(
@@ -455,12 +621,15 @@ def watchlist_entry_detail(
             callback_data=(f"wlm:{page}" if own else f"wlv:{owner.telegram_user_id}:{page}"),
         )
     )
-    availability = "Available in catalog" if content_available else "Text-only watchlist entry"
+    availability = "Available in the library" if content_available else "Custom saved title"
+    source_icon = "🎞" if content_available else "✍️"
     text = (
-        f"📚 <b>{safe_html(entry.title)}</b>\n\n"
-        f"Category: {safe_html(entry.category_name)}\n"
-        f"Status: {_watch_status_label(entry.status)}\n"
-        f"Source: {availability}"
+        f"📚 <b>{safe_html(entry.title)}</b>\n"
+        "<blockquote>Watchlist title details</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🗂 <b>Category</b>  •  {safe_html(entry.category_name)}\n"
+        f"🏷 <b>Status</b>  •  {_watch_status_label(entry.status)}\n"
+        f"{source_icon} <b>Source</b>  •  {availability}"
     )
     return text, builder.as_markup()
 
@@ -474,8 +643,11 @@ def public_watchlist_directory(
         username = f" @{user.username}" if user.username else ""
         builder.row(
             InlineKeyboardButton(
-                text=compact_label(f"👤 {user.first_name}{username} — {len(user.watchlist)}", 58),
+                text=compact_label(
+                    f"👤 {user.first_name}{username} · {len(user.watchlist)} titles", 58
+                ),
                 callback_data=f"wlv:{user.telegram_user_id}:0",
+                style="primary",
             )
         )
     navigation: list[InlineKeyboardButton] = []
@@ -486,33 +658,54 @@ def public_watchlist_directory(
     if navigation:
         builder.row(*navigation)
     builder.row(InlineKeyboardButton(text="◀️ Watchlist", callback_data="menu:watchlist"))
-    text = f"🌐 <b>Community watchlists</b>\n\nPage {page + 1} of {pages}"
+    text = (
+        "🌐 <b>COMMUNITY WATCHLISTS</b>\n"
+        "<blockquote>Discover what other members saved.</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"👥 Public lists: <b>{len(users)}</b>\n"
+        f"{_page_line(page, pages)}"
+    )
     if not users:
-        text += "\n\nNo other public watchlists are available."
+        text += "\n\n🫙 <i>No other public watchlists are available yet.</i>"
     return text, builder.as_markup()
 
 
 def admin_dashboard() -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="🗂 Categories", callback_data="admin:categories"),
-        InlineKeyboardButton(text="🎞 Catalog", callback_data="admin:files"),
+        InlineKeyboardButton(
+            text="🗂 Categories", callback_data="admin:categories", style="primary"
+        ),
+        InlineKeyboardButton(text="🎞 Catalog", callback_data="admin:files", style="primary"),
     )
     builder.row(
-        InlineKeyboardButton(text="❌ Index failures", callback_data="admin:failures"),
-        InlineKeyboardButton(text="👥 Users", callback_data="admin:users"),
+        InlineKeyboardButton(
+            text="⚠️ Index failures", callback_data="admin:failures", style="primary"
+        ),
+        InlineKeyboardButton(text="👥 Users", callback_data="admin:users", style="primary"),
     )
     builder.row(
         InlineKeyboardButton(text="📊 Statistics", callback_data="admin:stats"),
         InlineKeyboardButton(text="💾 Database", callback_data="admin:database"),
     )
     builder.row(
-        InlineKeyboardButton(text="🔐 Access", callback_data="admin:access"),
+        InlineKeyboardButton(text="🔐 Access", callback_data="admin:access", style="primary"),
         InlineKeyboardButton(text="⚙️ Settings", callback_data="admin:settings"),
     )
-    builder.row(InlineKeyboardButton(text="📜 Audit", callback_data="admin:audit"))
+    builder.row(InlineKeyboardButton(text="📜 Audit trail", callback_data="admin:audit"))
     builder.row(InlineKeyboardButton(text="🏠 User menu", callback_data="menu:home"))
-    return "🛡 <b>Admin panel</b>\n\nChoose an area to manage:", builder.as_markup()
+    return (
+        (
+            "🛡 <b>ADMIN CONTROL CENTER</b>\n"
+            "<blockquote>Catalog, access, recovery, and operations.</blockquote>\n"
+            f"{DIVIDER}\n"
+            "⚡ <b>Quick actions</b>\n"
+            "Choose a workspace below. Destructive actions always require confirmation.\n"
+            f"{DIVIDER}\n"
+            "🔐 Owner-only area"
+        ),
+        builder.as_markup(),
+    )
 
 
 def admin_categories(categories: list[Category]) -> tuple[str, InlineKeyboardMarkup]:
@@ -521,36 +714,58 @@ def admin_categories(categories: list[Category]) -> tuple[str, InlineKeyboardMar
         status = "✅" if item.enabled else "⏸"
         builder.row(
             InlineKeyboardButton(
-                text=compact_label(f"{status} {item.name}"), callback_data=f"ac:{item.id}"
+                text=compact_label(f"{status} {item.name}"),
+                callback_data=f"ac:{item.id}",
+                style="primary" if item.enabled else None,
             )
         )
-    builder.row(InlineKeyboardButton(text="➕ Add category", callback_data="aca:start"))
+    builder.row(
+        InlineKeyboardButton(text="➕ Add new category", callback_data="aca:start", style="success")
+    )
     builder.row(InlineKeyboardButton(text="◀️ Admin panel", callback_data="admin:home"))
-    return f"🗂 <b>Categories</b>\n\nConfigured: {len(categories)}", builder.as_markup()
+    enabled = sum(category.enabled for category in categories)
+    text = (
+        "🗂 <b>CATEGORY MANAGEMENT</b>\n"
+        "<blockquote>Control library collections and source channels.</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"✅ Enabled: <b>{enabled}</b>  •  ⏸ Disabled: <b>{len(categories) - enabled}</b>\n"
+        f"📚 Total configured: <b>{len(categories)}</b>"
+    )
+    if not categories:
+        text += "\n\n🫙 <i>No categories configured. Add the first one below.</i>"
+    return text, builder.as_markup()
 
 
 def admin_category_detail(category: Category) -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="✏️ Rename", callback_data=f"acr:{category.id}"),
-        InlineKeyboardButton(text="🔄 Change channel", callback_data=f"acc:{category.id}"),
+        InlineKeyboardButton(text="✏️ Rename", callback_data=f"acr:{category.id}", style="primary"),
+        InlineKeyboardButton(
+            text="🔄 Change channel", callback_data=f"acc:{category.id}", style="primary"
+        ),
     )
     builder.row(
-        InlineKeyboardButton(text="⚙️ Change mode", callback_data=f"acm:{category.id}"),
+        InlineKeyboardButton(
+            text="⚙️ Change mode", callback_data=f"acm:{category.id}", style="primary"
+        ),
         InlineKeyboardButton(
             text="⏸ Disable" if category.enabled else "✅ Enable",
             callback_data=f"act:{category.id}",
+            style=None if category.enabled else "success",
         ),
     )
     builder.row(InlineKeyboardButton(text="◀️ Categories", callback_data="admin:categories"))
+    status_icon = "✅" if category.enabled else "⏸"
     text = (
-        f"🗂 <b>{safe_html(category.name)}</b>\n\n"
-        f"ID: <code>{category.id}</code>\n"
-        f"Channel: {safe_html(category.channel_title or 'Unknown')}\n"
-        f"Channel ID: <code>{category.active_channel_id}</code>\n"
-        f"Mode: {category.mode.value}\n"
-        f"Status: {'Enabled' if category.enabled else 'Disabled'}\n"
-        f"Legacy channels: {len(category.legacy_channel_ids)}"
+        f"🗂 <b>{safe_html(category.name)}</b>\n"
+        "<blockquote>Category configuration</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🆔 <b>ID</b>  •  <code>{category.id}</code>\n"
+        f"📡 <b>Channel</b>  •  {safe_html(category.channel_title or 'Unknown')}\n"
+        f"🔢 <b>Channel ID</b>  •  <code>{category.active_channel_id}</code>\n"
+        f"⚙️ <b>Mode</b>  •  {safe_html(category.mode.value.title())}\n"
+        f"{status_icon} <b>Status</b>  •  {'Enabled' if category.enabled else 'Disabled'}\n"
+        f"🗄 <b>Legacy channels</b>  •  {len(category.legacy_channel_ids)}"
     )
     return text, builder.as_markup()
 
@@ -565,13 +780,20 @@ def access_mode_panel(current: AccessMode) -> tuple[str, InlineKeyboardMarkup]:
     for mode, label in labels.items():
         selected = " ✓" if mode == current else ""
         builder.row(
-            InlineKeyboardButton(text=label + selected, callback_data=f"access:{mode.value}")
+            InlineKeyboardButton(
+                text=label + selected,
+                callback_data=f"access:{mode.value}",
+                style="success" if mode == current else "primary",
+            )
         )
     builder.row(InlineKeyboardButton(text="◀️ Admin panel", callback_data="admin:home"))
     return (
         (
-            f"🔐 <b>Access mode</b>\n\nCurrent mode: <b>{current.value}</b>\n\n"
-            "Changing the mode never unbans suspended or banned users."
+            "🔐 <b>ACCESS CONTROL</b>\n"
+            "<blockquote>Choose who can use the media library.</blockquote>\n"
+            f"{DIVIDER}\n"
+            f"🟢 Current mode  •  <b>{safe_html(current.value.title())}</b>\n\n"
+            "ℹ️ Mode changes never unban suspended or banned users."
         ),
         builder.as_markup(),
     )
@@ -590,36 +812,65 @@ def users_panel(users: list[UserProfile]) -> tuple[str, InlineKeyboardMarkup]:
     ):
         builder.row(
             InlineKeyboardButton(
-                text=f"{icon} {status.value.title()} — {counts[status]}",
+                text=f"{icon} {status.value.title()} · {counts[status]}",
                 callback_data=f"aul:{status.value}:0",
+                style="primary",
             )
         )
-    builder.row(InlineKeyboardButton(text="🔎 Find user", callback_data="auf:start"))
+    builder.row(
+        InlineKeyboardButton(text="🔎 Find a user", callback_data="auf:start", style="primary")
+    )
     builder.row(InlineKeyboardButton(text="◀️ Admin panel", callback_data="admin:home"))
-    return f"👥 <b>Users</b>\n\nTotal registered: {len(users)}", builder.as_markup()
+    return (
+        (
+            "👥 <b>USER MANAGEMENT</b>\n"
+            "<blockquote>Review access and account status.</blockquote>\n"
+            f"{DIVIDER}\n"
+            f"👤 Total registered: <b>{len(users)}</b>\n"
+            f"✅ {counts[UserStatus.ACTIVE]} active  •  "
+            f"🕓 {counts[UserStatus.PENDING]} pending\n"
+            f"⏸ {counts[UserStatus.SUSPENDED]} suspended  •  "
+            f"⛔ {counts[UserStatus.BANNED]} banned"
+        ),
+        builder.as_markup(),
+    )
 
 
 def user_detail(user: UserProfile) -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="✅ Activate", callback_data=f"aus:{user.telegram_user_id}:active"
+            text="✅ Activate",
+            callback_data=f"aus:{user.telegram_user_id}:active",
+            style="success",
         ),
         InlineKeyboardButton(
             text="⏸ Suspend", callback_data=f"aus:{user.telegram_user_id}:suspended"
         ),
     )
     builder.row(
-        InlineKeyboardButton(text="⛔ Ban", callback_data=f"aus:{user.telegram_user_id}:banned")
+        InlineKeyboardButton(
+            text="⛔ Ban user",
+            callback_data=f"aus:{user.telegram_user_id}:banned",
+            style="danger",
+        )
     )
     builder.row(InlineKeyboardButton(text="◀️ Users", callback_data="admin:users"))
-    username = f"@{safe_html(user.username)}" if user.username else "None"
+    username = f"@{safe_html(user.username)}" if user.username else "Not set"
+    status_icons = {
+        UserStatus.ACTIVE: "✅",
+        UserStatus.PENDING: "🕓",
+        UserStatus.SUSPENDED: "⏸",
+        UserStatus.BANNED: "⛔",
+    }
     text = (
-        f"👤 <b>{safe_html(user.first_name)}</b>\n\n"
-        f"User ID: <code>{user.telegram_user_id}</code>\n"
-        f"Username: {username}\n"
-        f"Status: <b>{user.status.value}</b>\n"
-        f"Joined: {safe_html(user.created_at)}\n"
-        f"Watchlist entries: {len(user.watchlist)}"
+        f"👤 <b>{safe_html(user.first_name)}</b>\n"
+        "<blockquote>User access profile</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🆔 <b>User ID</b>  •  <code>{user.telegram_user_id}</code>\n"
+        f"🔗 <b>Username</b>  •  {username}\n"
+        f"{status_icons[user.status]} <b>Status</b>  •  {safe_html(user.status.value.title())}\n"
+        f"📅 <b>Joined</b>  •  {safe_html(user.created_at)}\n"
+        f"📚 <b>Watchlist</b>  •  {len(user.watchlist)} titles"
     )
     return text, builder.as_markup()

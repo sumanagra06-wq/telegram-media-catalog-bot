@@ -201,14 +201,24 @@ def variant_label(file: FileRecord) -> str:
 
 def delivery_caption(file: FileRecord, kind: ContentKind) -> str:
     icon = "📺" if kind == ContentKind.SERIES else "🎬"
-    year = f" ({file.year})" if file.year else ""
-    lines = [f"{icon} <b>{safe_html(file.title)}{year}</b>"]
+    kind_label = "Series delivery" if kind == ContentKind.SERIES else "Movie delivery"
+    lines = [
+        f"{icon} <b>{safe_html(file.title)}</b>",
+        f"<blockquote>{kind_label} • protected file</blockquote>",
+        "━━━━━━━━━━━━━━━━━━",
+    ]
     if file.record_kind == RecordKind.EPISODE:
-        lines.append(f"Season {file.season} • Episode {file.episode}")
+        lines.append(f"▶️ <b>Episode</b>  •  Season {file.season}, Episode {file.episode}")
     elif file.record_kind == RecordKind.SEASON_PACK_PART:
-        lines.append(f"Season {file.season} Pack • Part {file.pack_part or 1}")
-    lines.append(
-        "Language: " + safe_html(", ".join(file.languages) if file.languages else "Unknown")
+        lines.append(f"📦 <b>Season pack</b>  •  Season {file.season}, Part {file.pack_part or 1}")
+    lines.extend(
+        [
+            f"📅 <b>Year</b>  •  {file.year or 'Unknown'}",
+            "🗣 <b>Language</b>  •  "
+            + safe_html(", ".join(file.languages) if file.languages else "Unknown"),
+            "💎 <b>Quality</b>  •  " + safe_html(file.quality or "Unknown"),
+            "━━━━━━━━━━━━━━━━━━",
+            "🔐 Delivered with Telegram content protection.",
+        ]
     )
-    lines.append("Quality: " + safe_html(file.quality or "Unknown"))
     return "\n".join(lines)

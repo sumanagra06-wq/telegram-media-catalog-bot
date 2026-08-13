@@ -10,8 +10,11 @@ This report records checks performed before packaging. It is not a claim that li
 - User-scoped watchlist mutation authorization and private-visibility enforcement
 - Owner-only catalog removal, tombstones, Telegram deletion retry, and manual-cleanup confirmation
 - Search ranking, pagination and callback-size constraints
+- Semantic Bot API button styles (`primary`, `success`, `danger`) with neutral secondary actions
+- Unicode-emoji labels and consistent HTML card hierarchy across user and owner screens
+- Absence of custom-emoji dependencies and preservation of existing callback contracts
 - Series episodes, variants and split season packs
-- Protected delivery and Telegram file-ID fallback
+- Protected delivery, structured delivery captions and Telegram file-ID fallback
 - Native user/owner command scopes
 - Private-chat and owner authorization filters
 - Caption metadata allowlisting and supplied real-world formats
@@ -33,17 +36,20 @@ This report records checks performed before packaging. It is not a claim that li
 9. Fixed filename-style values after `Title:`/`Name:` so episode tokens never become part of the catalog identity; added persistence-boundary canonicalization and an idempotent startup migration that merges affected titles without re-uploading Telegram media.
 10. Replaced direct catalog-screen watchlist controls with a dedicated panel supporting dynamic categories, manual and indexed titles, explicit status selection, public-by-default read-only community lists, and a private visibility toggle. Added versioned migration for legacy entries.
 11. Added owner-only, double-confirmed catalog-title removal. The catalog commit blocks delivery first, source tombstones prevent re-indexing, recent Telegram posts are deleted in batches, failures remain retryable, and old posts can be manually confirmed after Telegram's deletion window expires.
+12. Reworked the native Telegram interface into concise card-style screens with clear hierarchy, standard Unicode emoji, official semantic button colors, richer search/media/Watchlist/admin states, neutral back/cancel controls, and prominent double-confirmed destructive actions. Existing callback expressions remain present and no custom-emoji IDs are used.
 
 ## Automated results at package time
 
 - Ruff lint: passed
 - Ruff formatting check: passed
 - Python compileall: passed
-- Pytest with warnings treated as errors: passed (70 tests)
-- Test coverage: 60% overall; parser 98%, snapshot storage 84%, repositories 70%, services 79%, Watchlist handlers 49%, and UI 61%, with credential-dependent Telegram/Railway branches necessarily unexecuted
+- Pytest with warnings treated as errors: passed (75 tests)
+- Test coverage: 61% overall; parser 98%, snapshot storage 84%, repositories 72%, services 79%, Watchlist handlers 53%, UI 66%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
 - Bandit: passed; the required Railway `0.0.0.0` bind is explicitly documented/suppressed
 - pip-audit: passed, no known vulnerabilities in production requirements
-- Mypy: core models, parser, storage, repositories, services, UI, commands and filters passed
+- Mypy: core configuration, models, parser, storage, repositories, services, UI and presentation modules passed
+- Callback contract audit: all 128 baseline button callback expressions retained; five additive navigation/cancel actions
+- Representative rendering audit: 20 screens passed Telegram HTML, text/button length, callback-size, style-value, and no-custom-emoji checks
 - Placeholder scan: no TODO/FIXME/NotImplemented markers
 
 The Aiogram handler layer is linted, compiled and exercised through domain/UI tests, but is not claimed as fully strict-mypy-clean because Aiogram's runtime filters narrow optional callback/message fields in ways its static types do not express.
@@ -66,6 +72,11 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Search ranking
 - Episode/pack navigation structures
 - Telegram callback-data size limits
+- Official button-style serialization and semantic blue/green/red/default assignment
+- Neutral cancel/back/suspend/disable controls and destructive red confirmations
+- Optional style metadata preserving text and callback behavior on older clients
+- Main, Watchlist and admin dashboard callback-contract preservation
+- No custom-emoji IDs on primary dashboards
 - Plain-text user search → content screen → episode protected-delivery handler flow
 - Automatic channel-post indexing handler flow with allowlisted metadata only
 - Six separate `Operation Safed Sagar ... S01E01`–`S01E06` messages, including filename-style labels and forwarding warnings, grouping as one title with six files
@@ -86,5 +97,6 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - The standard Bot API cannot scan arbitrary old channel history; `/index` is required for missed old posts.
 - Telegram normally limits bot message deletion to messages sent within 48 hours. Older source posts require manual owner deletion; catalog tombstones still block delivery and re-indexing immediately.
 - Telegram protected content blocks normal official-client forwarding/saving but is not absolute DRM against modified clients or external capture.
+- Older Telegram clients that predate semantic button styles render the same buttons with neutral/default styling; callback behavior is unchanged.
 - The normal Bot API snapshot download ceiling still applies; the app rejects compressed snapshots near that limit instead of silently corrupting recovery.
 - Exactly one Railway replica must remain configured because there is no external distributed lock.

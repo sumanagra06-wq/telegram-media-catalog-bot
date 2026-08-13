@@ -4,12 +4,13 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
+from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..config import Config
 from ..guards import access_denied_text, can_use_bot, ensure_registered
 from ..models import UserProfile, UserStatus
+from ..presentation import ActionButton as InlineKeyboardButton
 from ..repositories import CatalogRepository, UserRepository
 from ..services import CatalogQueryService
 from ..ui import (
@@ -28,6 +29,13 @@ from .common import edit_screen
 router = Router(name="watchlist")
 router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
+DIVIDER = "━━━━━━━━━━━━━━━━━━"
+
+
+def _cancel_markup() -> InlineKeyboardBuilder:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data="menu:watchlist"))
+    return builder
 
 
 class WatchlistAddState(StatesGroup):
@@ -145,8 +153,12 @@ async def manual_category_selected(
     await callback.answer()
     await edit_screen(
         callback,
-        f"✍️ <b>{safe_html(category.name)}</b>\n\nSend the title name, or /cancel.",
-        None,
+        "✍️ <b>ADD A CUSTOM TITLE</b>\n"
+        f"<blockquote>{safe_html(category.name)} • Step 2 of 3</blockquote>\n"
+        f"{DIVIDER}\n"
+        "⌨️ Send the title name in your next message.\n\n"
+        "💡 You can save any title, even when it is not in the library.",
+        _cancel_markup().as_markup(),
     )
 
 
@@ -198,7 +210,7 @@ async def manual_status_selected(
     if profile is None:
         raise RuntimeError("Registered watchlist owner disappeared")
     text, markup = watchlist_home(profile)
-    await callback.answer("Title added." if created else "Existing title updated.")
+    await callback.answer("✅ Title added." if created else "✅ Existing title updated.")
     await edit_screen(callback, text, markup)
 
 
@@ -238,8 +250,12 @@ async def catalog_category_selected(
     await callback.answer()
     await edit_screen(
         callback,
-        f"🔎 <b>{safe_html(category.name)}</b>\n\nSend all or part of the catalog title, or /cancel.",
-        None,
+        "🔎 <b>FIND A CATALOG TITLE</b>\n"
+        f"<blockquote>{safe_html(category.name)} • Step 2 of 3</blockquote>\n"
+        f"{DIVIDER}\n"
+        "⌨️ Send all or part of the title name.\n\n"
+        "🎯 The closest matching catalog titles will appear first.",
+        _cancel_markup().as_markup(),
     )
 
 
@@ -256,19 +272,30 @@ async def catalog_title_query(
         hit.content for hit in query.search(message.text) if hit.content.category_id == category_id
     ][:8]
     if not matches:
-        await message.answer("No matching title in that category. Try again or /cancel.")
+        await message.answer(
+            "🔍 <b>NO CATALOG MATCH</b>\n"
+            "Try fewer words or check the spelling. Use /cancel to stop."
+        )
         return
     builder = InlineKeyboardBuilder()
     for content in matches:
-        year = f" ({content.year})" if content.year else ""
+        year = f" ({content.year or 'Unknown'})"
+        icon = "📺" if content.kind.value == "series" else "🎬"
         builder.row(
             InlineKeyboardButton(
-                text=compact_label(content.title + year, 58),
+                text=compact_label(f"{icon} {content.title}{year}", 58),
                 callback_data=f"wacp:{content.id}",
+                style="primary",
             )
         )
-    builder.row(InlineKeyboardButton(text="Cancel", callback_data="menu:watchlist"))
-    await message.answer("Select the catalog title:", reply_markup=builder.as_markup())
+    builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data="menu:watchlist"))
+    await message.answer(
+        "🎯 <b>CHOOSE A CATALOG TITLE</b>\n"
+        f"<blockquote>{len(matches)} matching title{'s' if len(matches) != 1 else ''}</blockquote>\n"
+        f"{DIVIDER}\n"
+        "Select the correct title below:",
+        reply_markup=builder.as_markup(),
+    )
 
 
 @router.callback_query(WatchlistAddState.catalog_query, F.data.startswith("wacp:"))
@@ -329,7 +356,7 @@ async def catalog_status_selected(
     if profile is None:
         raise RuntimeError("Registered watchlist owner disappeared")
     text, markup = watchlist_home(profile)
-    await callback.answer("Title added." if created else "Existing title updated.")
+    await callback.answer("✅ Title added." if created else "✅ Existing title updated.")
     await edit_screen(callback, text, markup)
 
 
@@ -420,13 +447,18 @@ async def remove_entry_confirm(
         return
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="Delete", callback_data=f"wldc:{entry.id}"),
-        InlineKeyboardButton(text="Cancel", callback_data=f"wle:{entry.id}:0"),
+        InlineKeyboardButton(
+            text="🗑 Remove title", callback_data=f"wldc:{entry.id}", style="danger"
+        ),
+        InlineKeyboardButton(text="✖️ Cancel", callback_data=f"wle:{entry.id}:0"),
     )
     await callback.answer()
     await edit_screen(
         callback,
-        f"Remove <b>{safe_html(entry.title)}</b> from your watchlist?",
+        "🗑 <b>REMOVE FROM WATCHLIST?</b>\n"
+        f"<blockquote>{safe_html(entry.title)}</blockquote>\n"
+        f"{DIVIDER}\n"
+        "This only removes your saved entry. The catalog title and files are not affected.",
         builder.as_markup(),
     )
 
@@ -446,7 +478,7 @@ async def remove_entry(
     if refreshed is None:
         raise RuntimeError("Registered watchlist owner disappeared")
     text, markup = watchlist_home(refreshed)
-    await callback.answer("Removed." if removed else "Entry was already removed.")
+    await callback.answer("✅ Removed." if removed else "ℹ️ Entry was already removed.")
     await edit_screen(callback, text, markup)
 
 
@@ -462,7 +494,7 @@ async def watchlist_visibility(
     is_public = callback.data.split(":", 1)[1] == "1"
     updated = await users.set_watchlist_visibility(profile.telegram_user_id, is_public)
     text, markup = watchlist_home(updated)
-    await callback.answer("Watchlist shared." if is_public else "Watchlist is now private.")
+    await callback.answer("🌐 Watchlist shared." if is_public else "🔒 Watchlist is now private.")
     await edit_screen(callback, text, markup)
 
 
@@ -534,4 +566,4 @@ async def shared_watchlist_entry(
 
 @router.message(StateFilter(WatchlistAddState), ~F.text)
 async def watchlist_non_text_input(message: Message) -> None:
-    await message.answer("Send a text title or use /cancel.")
+    await message.answer("⌨️ Please send a text title, or use /cancel to stop.")

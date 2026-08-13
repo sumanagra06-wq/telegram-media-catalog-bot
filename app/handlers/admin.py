@@ -12,7 +12,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
-    InlineKeyboardButton,
     Message,
     MessageOriginChannel,
 )
@@ -21,6 +20,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from ..config import Config
 from ..filters import NotOwnerFilter, OwnerFilter
 from ..models import AccessMode, CategoryMode, RemovedSourceRecord, UserStatus
+from ..presentation import ActionButton as InlineKeyboardButton
 from ..repositories import CatalogRepository, UserRepository
 from ..ui import (
     access_mode_panel,
@@ -41,6 +41,7 @@ router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
 owner = OwnerFilter()
 not_owner = NotOwnerFilter()
+DIVIDER = "━━━━━━━━━━━━━━━━━━"
 
 
 def _default_category_mode(name: str) -> CategoryMode:
@@ -96,7 +97,12 @@ async def _show_add_confirmation(
         channel_id = int(raw_channel_id.strip())
         title = await _validate_private_channel(bot, channel_id, config)
     except (ValueError, TypeError) as exc:
-        await message.answer(f"❌ {safe_html(exc)}\n\nSend a valid private channel ID or /cancel.")
+        await message.answer(
+            "❌ <b>CHANNEL VALIDATION FAILED</b>\n"
+            f"<blockquote>{safe_html(exc)}</blockquote>\n"
+            f"{DIVIDER}\n"
+            "Send a valid private channel ID, or use /cancel to stop."
+        )
         return
     mode = _default_category_mode(name)
     await state.set_state(AdminState.category_confirm)
@@ -112,11 +118,13 @@ async def _show_add_confirmation(
         InlineKeyboardButton(text="Cancel", callback_data="aca:cancel"),
     )
     await message.answer(
-        "<b>Confirm new category</b>\n\n"
-        f"Name: {safe_html(name)}\n"
-        f"Channel: {safe_html(title)}\n"
-        f"Channel ID: <code>{channel_id}</code>\n"
-        f"Mode: {mode.value}",
+        "✅ <b>CONFIRM NEW CATEGORY</b>\n"
+        "<blockquote>Review the source before creating it.</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🗂 <b>Name</b>  •  {safe_html(name)}\n"
+        f"📡 <b>Channel</b>  •  {safe_html(title)}\n"
+        f"🔢 <b>Channel ID</b>  •  <code>{channel_id}</code>\n"
+        f"⚙️ <b>Mode</b>  •  {safe_html(mode.value.title())}",
         reply_markup=builder.as_markup(),
     )
 
@@ -216,7 +224,13 @@ async def category_add_command(
         await _show_add_confirmation(message, state, bot, config, name, channel_id)
         return
     await state.set_state(AdminState.category_name)
-    await message.answer("Send the new category name, or /cancel.")
+    await message.answer(
+        "➕ <b>ADD A CATEGORY</b>\n"
+        "<blockquote>Step 1 of 2 • choose a display name</blockquote>\n"
+        f"{DIVIDER}\n"
+        "Send a short category name, such as <code>Movies</code> or <code>Anime</code>.\n\n"
+        "Use /cancel to stop."
+    )
 
 
 @router.callback_query(F.data == "aca:start", owner)
@@ -224,7 +238,13 @@ async def category_add_start(callback: CallbackQuery, state: FSMContext) -> None
     await state.clear()
     await state.set_state(AdminState.category_name)
     await callback.answer()
-    await callback.message.answer("Send the new category name, or /cancel.")
+    await callback.message.answer(
+        "➕ <b>ADD A CATEGORY</b>\n"
+        "<blockquote>Step 1 of 2 • choose a display name</blockquote>\n"
+        f"{DIVIDER}\n"
+        "Send a short category name, such as <code>Movies</code> or <code>Anime</code>.\n\n"
+        "Use /cancel to stop."
+    )
 
 
 @router.message(AdminState.category_name, owner, F.text)
@@ -236,8 +256,11 @@ async def category_name_input(message: Message, state: FSMContext) -> None:
     await state.update_data(category_name=name)
     await state.set_state(AdminState.category_channel)
     await message.answer(
-        "Now send the private storage channel ID.\n\n"
-        "The bot must already be an administrator in that channel."
+        "📡 <b>CONNECT STORAGE CHANNEL</b>\n"
+        "<blockquote>Step 2 of 2 • private source channel</blockquote>\n"
+        f"{DIVIDER}\n"
+        "Send the private channel’s numeric ID.\n\n"
+        "✅ The bot must already be an administrator with permission to delete messages."
     )
 
 
@@ -287,7 +310,12 @@ async def category_rename_start(callback: CallbackQuery, state: FSMContext) -> N
     await state.set_state(AdminState.category_rename)
     await state.update_data(category_id=category_id)
     await callback.answer()
-    await callback.message.answer("Send the new category name, or /cancel.")
+    await callback.message.answer(
+        "✏️ <b>RENAME CATEGORY</b>\n"
+        "<blockquote>Update the display name without changing its files.</blockquote>\n"
+        f"{DIVIDER}\n"
+        "Send the new category name, or use /cancel to stop."
+    )
 
 
 @router.message(AdminState.category_rename, owner, F.text)
@@ -316,7 +344,11 @@ async def category_channel_start(callback: CallbackQuery, state: FSMContext) -> 
     await state.update_data(category_id=category_id)
     await callback.answer()
     await callback.message.answer(
-        "Send the new private channel ID. The old channel will remain as a legacy source."
+        "🔄 <b>CHANGE STORAGE CHANNEL</b>\n"
+        "<blockquote>Connect a new private source channel.</blockquote>\n"
+        f"{DIVIDER}\n"
+        "Send the new private channel ID.\n\n"
+        "🗄 The previous channel remains registered as a legacy source for existing files."
     )
 
 
@@ -350,12 +382,23 @@ async def category_mode_start(callback: CallbackQuery) -> None:
     for mode in CategoryMode:
         builder.row(
             InlineKeyboardButton(
-                text=mode.value.title(), callback_data=f"acms:{category_id}:{mode.value}"
+                text=f"⚙️ {mode.value.title()}",
+                callback_data=f"acms:{category_id}:{mode.value}",
+                style="primary",
             )
         )
     builder.row(InlineKeyboardButton(text="Cancel", callback_data=f"ac:{category_id}"))
     await callback.answer()
-    await edit_screen(callback, "Choose the category behaviour:", builder.as_markup())
+    await edit_screen(
+        callback,
+        "⚙️ <b>CHANGE CATEGORY MODE</b>\n"
+        "<blockquote>Choose how filenames in this channel are interpreted.</blockquote>\n"
+        f"{DIVIDER}\n"
+        "🎬 <b>Single</b>  •  movies and standalone files\n"
+        "📺 <b>Episodic</b>  •  seasons and episodes\n"
+        "🗂 <b>Mixed</b>  •  automatically detect both",
+        builder.as_markup(),
+    )
 
 
 @router.callback_query(F.data.startswith("acms:"), owner)
@@ -379,13 +422,25 @@ async def category_toggle_confirm(callback: CallbackQuery, catalog: CatalogRepos
     action = "disable" if category.enabled else "enable"
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text=f"Confirm {action}", callback_data=f"actc:{category_id}"),
-        InlineKeyboardButton(text="Cancel", callback_data=f"ac:{category_id}"),
+        InlineKeyboardButton(
+            text=f"{'✅' if action == 'enable' else '⏸'} Confirm {action}",
+            callback_data=f"actc:{category_id}",
+            style="success" if action == "enable" else None,
+        ),
+        InlineKeyboardButton(text="✖️ Cancel", callback_data=f"ac:{category_id}"),
+    )
+    impact = (
+        "Users will see and search this category."
+        if action == "enable"
+        else "The category will be hidden from browsing and search until re-enabled."
     )
     await callback.answer()
     await edit_screen(
         callback,
-        f"Confirm that you want to <b>{action}</b> {safe_html(category.name)}.",
+        f"{'✅' if action == 'enable' else '⏸'} <b>CONFIRM {action.upper()}</b>\n"
+        f"<blockquote>{safe_html(category.name)}</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"ℹ️ {impact}",
         builder.as_markup(),
     )
 
@@ -410,14 +465,17 @@ async def _stats_text(catalog: CatalogRepository, users: UserRepository) -> str:
     ustate = users.snapshot()
     available = sum(1 for item in cstate.files.values() if item.available)
     return (
-        "📊 <b>Statistics</b>\n\n"
-        f"Categories: {len(cstate.categories)}\n"
-        f"Titles: {len(cstate.contents)}\n"
-        f"Files: {len(cstate.files)}\n"
-        f"Available files: {available}\n"
-        f"Index failures: {len(cstate.failures)}\n"
-        f"Users: {len(ustate.users)}\n"
-        f"Watchlist entries: {sum(len(user.watchlist) for user in ustate.users.values())}"
+        "📊 <b>LIBRARY OVERVIEW</b>\n"
+        "<blockquote>Live catalog and community totals.</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🗂 <b>Categories</b>  •  {len(cstate.categories)}\n"
+        f"🎬 <b>Titles</b>  •  {len(cstate.contents)}\n"
+        f"🎞 <b>Files</b>  •  {len(cstate.files)}\n"
+        f"✅ <b>Available</b>  •  {available}\n"
+        f"⚠️ <b>Index failures</b>  •  {len(cstate.failures)}\n"
+        f"👥 <b>Users</b>  •  {len(ustate.users)}\n"
+        "📚 <b>Watchlist entries</b>  •  "
+        f"{sum(len(user.watchlist) for user in ustate.users.values())}"
     )
 
 
@@ -443,14 +501,19 @@ async def _files_text(catalog: CatalogRepository) -> str:
     unavailable = [item for item in state.files.values() if not item.available]
     media = Counter(item.media_type.value for item in state.files.values())
     pending_deletions = len(catalog.pending_removed_sources())
+    health_icon = "✅" if not unavailable and not pending_deletions else "⚠️"
     return (
-        "🎞 <b>Catalog files</b>\n\n"
-        f"Titles: {len(state.contents)}\n"
-        f"Files: {len(state.files)}\n"
-        f"Videos: {media['video']}\n"
-        f"Documents: {media['document']}\n"
-        f"Unavailable: {len(unavailable)}\n"
-        f"Pending source deletions: {pending_deletions}"
+        "🎞 <b>CATALOG OPERATIONS</b>\n"
+        "<blockquote>File inventory, availability, and safe removal.</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🎬 <b>Titles</b>  •  {len(state.contents)}\n"
+        f"📦 <b>Total files</b>  •  {len(state.files)}\n"
+        f"▶️ <b>Videos</b>  •  {media['video']}\n"
+        f"📄 <b>Documents</b>  •  {media['document']}\n"
+        f"⚠️ <b>Unavailable</b>  •  {len(unavailable)}\n"
+        f"🧹 <b>Pending source deletions</b>  •  {pending_deletions}\n"
+        f"{DIVIDER}\n"
+        f"{health_icon} Catalog status reviewed"
     )
 
 
@@ -554,8 +617,9 @@ async def removable_titles(callback: CallbackQuery, catalog: CatalogRepository) 
         file_count = len(catalog.files_for_content(content.id, available_only=False))
         builder.row(
             InlineKeyboardButton(
-                text=compact_label(f"{content.title} — {file_count} files", 58),
+                text=compact_label(f"🗑 {content.title} · {file_count} files", 58),
                 callback_data=f"adrt:{content.id}:{page}",
+                style="danger",
             )
         )
     navigation = []
@@ -566,9 +630,16 @@ async def removable_titles(callback: CallbackQuery, catalog: CatalogRepository) 
     if navigation:
         builder.row(*navigation)
     builder.row(InlineKeyboardButton(text="◀️ Catalog", callback_data="admin:files"))
-    text = f"🗑 <b>Remove catalog title</b>\n\nPage {page + 1} of {pages}"
+    text = (
+        "🗑 <b>PERMANENT CATALOG REMOVAL</b>\n"
+        "<blockquote>Owner-only destructive workspace.</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🎬 Catalog titles: <b>{len(contents)}</b>\n"
+        f"<code>Page {page + 1}/{pages}</code>\n\n"
+        "⚠️ Choose a title only when it must be permanently removed from delivery."
+    )
     if not contents:
-        text += "\n\nThe catalog is empty."
+        text += "\n\n🫙 <i>The delivery catalog is empty.</i>"
     await callback.answer()
     await edit_screen(callback, text, builder.as_markup())
 
@@ -585,18 +656,23 @@ async def removable_title_detail(callback: CallbackQuery, catalog: CatalogReposi
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="Continue to permanent removal",
+            text="⚠️ Continue to permanent removal",
             callback_data=f"adrc:{content.id}:{page_text}",
+            style="danger",
         )
     )
     builder.row(InlineKeyboardButton(text="◀️ Titles", callback_data=f"adr:{page_text}"))
     text = (
-        f"🗑 <b>{safe_html(content.title)}</b>\n\n"
-        f"Category: {safe_html(category.name if category else 'Unknown')}\n"
-        f"Files and source posts: {len(files)}\n\n"
-        "This owner-only action removes the title from file delivery and attempts to "
-        "delete all associated source-channel posts. Telegram normally refuses bot deletion "
-        "after 48 hours; those posts must be deleted manually."
+        f"🗑 <b>{safe_html(content.title)}</b>\n"
+        "<blockquote>Permanent catalog removal review</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🗂 <b>Category</b>  •  {safe_html(category.name if category else 'Unknown')}\n"
+        f"📦 <b>Catalog files</b>  •  {len(files)}\n"
+        f"📡 <b>Source posts</b>  •  up to {len(files)} deletion attempts\n"
+        f"{DIVIDER}\n"
+        "⚠️ This removes delivery access and attempts to delete associated source posts.\n\n"
+        "ℹ️ Telegram normally refuses bot deletion after 48 hours; old posts must be "
+        "deleted manually. Watchlist entries are not affected."
     )
     await callback.answer()
     await edit_screen(callback, text, builder.as_markup())
@@ -613,18 +689,25 @@ async def remove_title_confirm(callback: CallbackQuery, catalog: CatalogReposito
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text=f"Permanently delete {len(files)} files",
+            text=f"🗑 Permanently delete {len(files)} files",
             callback_data=f"adrx:{content.id}",
+            style="danger",
         )
     )
     builder.row(InlineKeyboardButton(text="Cancel", callback_data=f"adrt:{content.id}:{page_text}"))
     await callback.answer()
     await edit_screen(
         callback,
-        "⚠️ <b>Permanent deletion</b>\n\n"
-        f"Delete <b>{safe_html(content.title)}</b>, all catalog file records, and attempt "
-        "deletion of all Telegram source posts? This cannot be undone. Posts older than "
-        "Telegram’s bot-deletion window require manual deletion.",
+        "🚨 <b>FINAL DELETION CONFIRMATION</b>\n"
+        f"<blockquote>{safe_html(content.title)}</blockquote>\n"
+        f"{DIVIDER}\n"
+        "This will permanently:\n"
+        f"• remove <b>{len(files)} catalog file records</b>\n"
+        "• block those sources from being re-indexed\n"
+        "• attempt deletion of their Telegram source posts\n\n"
+        "✅ Watchlist entries remain untouched.\n"
+        "⚠️ Old Telegram posts may require manual deletion.\n\n"
+        "<b>This action cannot be undone.</b>",
         builder.as_markup(),
     )
 
@@ -643,12 +726,17 @@ async def remove_title_execute(
         await callback.answer(str(exc), show_alert=True)
         return
     deleted, failed = await _delete_source_posts(bot, catalog, list(result.sources))
+    result_icon = "✅" if failed == 0 else "⚠️"
     summary = (
-        "🗑 <b>Catalog title removed</b>\n\n"
-        f"Title: {safe_html(result.content.title)}\n"
-        f"Catalog files removed: {len(result.files)}\n"
-        f"Telegram source posts deleted: {deleted}\n"
-        f"Pending source deletions: {failed}"
+        f"{result_icon} <b>CATALOG TITLE REMOVED</b>\n"
+        f"<blockquote>{safe_html(result.content.title)}</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🗑 Catalog files removed: {len(result.files)}\n"
+        f"✅ Source posts deleted: {deleted}\n"
+        f"🕓 Pending manual/retry deletion: {failed}\n"
+        f"{DIVIDER}\n"
+        "🔒 Delivery and re-indexing are now blocked.\n"
+        "📚 Watchlist entries were not changed."
     )
     try:
         await bot.send_message(
@@ -693,7 +781,10 @@ async def confirm_manual_source_cleanup(
         InlineKeyboardButton(text="Cancel", callback_data="admin:files"),
     )
     lines = [
-        "⚠️ <b>Pending Telegram source posts</b>",
+        "⚠️ <b>MANUAL SOURCE CLEANUP</b>",
+        "<blockquote>Only confirm after every listed Telegram post is gone.</blockquote>",
+        DIVIDER,
+        f"🕓 Pending posts: <b>{len(pending)}</b>",
         "",
         "Delete these posts manually before confirming:",
         "",
@@ -747,8 +838,9 @@ async def unavailable_files(callback: CallbackQuery, catalog: CatalogRepository)
     for item in visible:
         builder.row(
             InlineKeyboardButton(
-                text=compact_label(f"{item.title} • {item.id}", 58),
+                text=compact_label(f"⚠️ {item.title} • {item.id}", 58),
                 callback_data=f"af:{item.id}",
+                style="primary",
             )
         )
     nav = []
@@ -762,7 +854,12 @@ async def unavailable_files(callback: CallbackQuery, catalog: CatalogRepository)
     await callback.answer()
     await edit_screen(
         callback,
-        f"⚠️ <b>Unavailable files</b>\n\nPage {page + 1} of {pages}",
+        "⚠️ <b>UNAVAILABLE FILES</b>\n"
+        "<blockquote>Review files excluded from delivery.</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"📦 Total unavailable: <b>{len(values)}</b>\n"
+        f"<code>Page {page + 1}/{pages}</code>"
+        + ("\n\n🫙 <i>No unavailable files.</i>" if not values else ""),
         builder.as_markup(),
     )
 
@@ -779,12 +876,16 @@ async def unavailable_file_detail(callback: CallbackQuery, catalog: CatalogRepos
             InlineKeyboardButton(text="✅ Mark available", callback_data=f"afon:{record.id}")
         )
     builder.row(InlineKeyboardButton(text="◀️ Unavailable files", callback_data="afu:0"))
+    status_icon = "✅" if record.available else "⚠️"
     text = (
-        f"🎞 <b>{safe_html(record.title)}</b>\n\n"
-        f"File ID: <code>{record.id}</code>\n"
-        f"Status: {'Available' if record.available else 'Unavailable'}\n"
-        f"Source message: <code>{record.source_message_id}</code>\n"
-        f"Quality: {safe_html(record.quality or 'Unknown')}"
+        f"🎞 <b>{safe_html(record.title)}</b>\n"
+        "<blockquote>Catalog file diagnostics</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🆔 <b>File ID</b>  •  <code>{record.id}</code>\n"
+        f"{status_icon} <b>Status</b>  •  "
+        f"{'Available' if record.available else 'Unavailable'}\n"
+        f"📡 <b>Source message</b>  •  <code>{record.source_message_id}</code>\n"
+        f"💎 <b>Quality</b>  •  {safe_html(record.quality or 'Unknown')}"
     )
     await callback.answer()
     await edit_screen(callback, text, builder.as_markup())
@@ -807,10 +908,23 @@ async def _failures_text(catalog: CatalogRepository) -> str:
         catalog.snapshot().failures.values(), key=lambda item: item.updated_at, reverse=True
     )[:10]
     if not failures:
-        return "✅ <b>Index failures</b>\n\nNo unresolved indexing failures."
-    lines = ["❌ <b>Recent index failures</b>", ""]
+        return (
+            "✅ <b>INDEXING HEALTH</b>\n"
+            "<blockquote>Automatic channel indexing is clear.</blockquote>\n"
+            f"{DIVIDER}\n"
+            "🎉 No unresolved indexing failures."
+        )
+    lines = [
+        "❌ <b>RECENT INDEX FAILURES</b>",
+        "<blockquote>Review the newest unresolved channel messages.</blockquote>",
+        DIVIDER,
+        f"⚠️ Showing <b>{len(failures)}</b> recent failures",
+        "",
+    ]
     for item in failures:
-        lines.append(f"• Message <code>{item.source_message_id}</code>: {safe_html(item.reason)}")
+        lines.append(
+            f"• Message <code>{item.source_message_id}</code>  •  {safe_html(item.reason)}"
+        )
     return "\n".join(lines)
 
 
@@ -845,13 +959,26 @@ async def access_confirm(callback: CallbackQuery) -> None:
     mode = AccessMode(callback.data.split(":", 1)[1])
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="Confirm", callback_data=f"accessc:{mode.value}"),
-        InlineKeyboardButton(text="Cancel", callback_data="admin:access"),
+        InlineKeyboardButton(
+            text="✅ Apply access mode",
+            callback_data=f"accessc:{mode.value}",
+            style="success",
+        ),
+        InlineKeyboardButton(text="✖️ Cancel", callback_data="admin:access"),
     )
+    descriptions = {
+        AccessMode.PUBLIC: "All registered users can access the bot.",
+        AccessMode.APPROVAL: "New users wait for owner approval.",
+        AccessMode.ALLOWLIST: "Only users activated by the owner can enter.",
+    }
     await callback.answer()
     await edit_screen(
         callback,
-        f"Change access mode to <b>{mode.value}</b>? Existing bans and suspensions remain.",
+        "🔐 <b>CONFIRM ACCESS MODE</b>\n"
+        f"<blockquote>{safe_html(mode.value.title())}</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"👥 {descriptions[mode]}\n\n"
+        "ℹ️ Existing bans and suspensions remain unchanged.",
         builder.as_markup(),
     )
 
@@ -896,7 +1023,9 @@ async def user_status_list(callback: CallbackQuery, users: UserRepository) -> No
         label = f"{user.first_name} • {user.telegram_user_id}"
         builder.row(
             InlineKeyboardButton(
-                text=compact_label(label, 58), callback_data=f"au:{user.telegram_user_id}"
+                text=compact_label(f"👤 {label}", 58),
+                callback_data=f"au:{user.telegram_user_id}",
+                style="primary",
             )
         )
     nav = []
@@ -912,11 +1041,21 @@ async def user_status_list(callback: CallbackQuery, users: UserRepository) -> No
         builder.row(*nav)
     builder.row(InlineKeyboardButton(text="◀️ Users", callback_data="admin:users"))
     await callback.answer()
-    await edit_screen(
-        callback,
-        f"👥 <b>{status.value.title()} users</b>\n\nPage {page + 1} of {pages}",
-        builder.as_markup(),
+    status_icons = {
+        UserStatus.ACTIVE: "✅",
+        UserStatus.PENDING: "🕓",
+        UserStatus.SUSPENDED: "⏸",
+        UserStatus.BANNED: "⛔",
+    }
+    text = (
+        f"{status_icons[status]} <b>{status.value.upper()} USERS</b>\n"
+        f"<blockquote>{len(values)} account{'s' if len(values) != 1 else ''}</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"<code>Page {page + 1}/{pages}</code>"
     )
+    if not values:
+        text += "\n\n🫙 <i>No users currently have this status.</i>"
+    await edit_screen(callback, text, builder.as_markup())
 
 
 @router.callback_query(F.data.startswith("au:"), owner)
@@ -934,7 +1073,13 @@ async def user_detail_callback(callback: CallbackQuery, users: UserRepository) -
 async def user_find_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminState.user_find)
     await callback.answer()
-    await callback.message.answer("Send a Telegram user ID or exact @username, or /cancel.")
+    await callback.message.answer(
+        "🔎 <b>FIND A USER</b>\n"
+        "<blockquote>Search by an exact Telegram identity.</blockquote>\n"
+        f"{DIVIDER}\n"
+        "Send a numeric user ID or exact <code>@username</code>.\n\n"
+        "Use /cancel to stop."
+    )
 
 
 @router.message(AdminState.user_find, owner, F.text)
@@ -953,7 +1098,10 @@ async def user_find_input(
         )
     )
     if user is None:
-        await message.answer("User not found. Try again or /cancel.")
+        await message.answer(
+            "🔍 <b>USER NOT FOUND</b>\n"
+            "Check the numeric ID or exact username, then try again. Use /cancel to stop."
+        )
         return
     await state.clear()
     text, markup = user_detail(user)
@@ -999,12 +1147,15 @@ async def _db_status_text(catalog: CatalogRepository, users: UserRepository) -> 
     catalog_bytes = len(catalog.store.export_gzip())
     users_bytes = len(users.store.export_gzip())
     return (
-        "💾 <b>Database status</b>\n\n"
-        f"Catalog revision: {catalog.snapshot().revision}\n"
-        f"Catalog snapshot: {catalog_bytes / 1024:.1f} KiB\n"
-        f"Users revision: {users.snapshot().revision}\n"
-        f"Users snapshot: {users_bytes / 1024:.1f} KiB\n\n"
-        "Both states are restored from their private Telegram database channels."
+        "💾 <b>DATABASE & RECOVERY</b>\n"
+        "<blockquote>Pinned snapshots in private Telegram channels.</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🗂 <b>Catalog revision</b>  •  {catalog.snapshot().revision}\n"
+        f"📦 <b>Catalog snapshot</b>  •  {catalog_bytes / 1024:.1f} KiB\n"
+        f"👥 <b>Users revision</b>  •  {users.snapshot().revision}\n"
+        f"📦 <b>Users snapshot</b>  •  {users_bytes / 1024:.1f} KiB\n"
+        f"{DIVIDER}\n"
+        "✅ Both states can restore from their private database channels."
     )
 
 
@@ -1020,7 +1171,11 @@ async def database_callback(
     callback: CallbackQuery, catalog: CatalogRepository, users: UserRepository
 ) -> None:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="📤 Export backup", callback_data="adb:backup"))
+    builder.row(
+        InlineKeyboardButton(
+            text="📤 Export protected backups", callback_data="adb:backup", style="success"
+        )
+    )
     builder.row(InlineKeyboardButton(text="◀️ Admin panel", callback_data="admin:home"))
     await callback.answer()
     await edit_screen(callback, await _db_status_text(catalog, users), builder.as_markup())
@@ -1071,8 +1226,18 @@ async def backup_callback(
 async def _audit_text(catalog: CatalogRepository) -> str:
     events = catalog.recent_audit(15)
     if not events:
-        return "📜 <b>Audit log</b>\n\nNo events recorded."
-    lines = ["📜 <b>Recent audit events</b>", ""]
+        return (
+            "📜 <b>AUDIT TRAIL</b>\n"
+            "<blockquote>Recent owner and system changes.</blockquote>\n"
+            f"{DIVIDER}\n"
+            "🫙 <i>No events recorded.</i>"
+        )
+    lines = [
+        "📜 <b>RECENT AUDIT EVENTS</b>",
+        f"<blockquote>Latest {len(events)} recorded changes.</blockquote>",
+        DIVIDER,
+        "",
+    ]
     for event in events:
         actor = f" by {event.actor_id}" if event.actor_id else ""
         lines.append(f"• {safe_html(event.action)}{actor}: {safe_html(event.details)}")
@@ -1093,12 +1258,16 @@ async def audit_callback(callback: CallbackQuery, catalog: CatalogRepository) ->
 
 
 def _settings_text(config: Config, users: UserRepository) -> str:
+    protection_icon = "✅" if config.protect_delivered_content else "⚠️"
     return (
-        "⚙️ <b>Bot settings</b>\n\n"
-        f"Access mode: {users.snapshot().access_mode.value}\n"
-        f"Protected delivery: {'Enabled' if config.protect_delivered_content else 'Disabled'}\n"
-        "Search results per page: 4\n"
-        "User interface: native commands + inline dashboard"
+        "⚙️ <b>BOT SETTINGS</b>\n"
+        "<blockquote>Current runtime configuration.</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🔐 <b>Access mode</b>  •  {safe_html(users.snapshot().access_mode.value.title())}\n"
+        f"{protection_icon} <b>Protected delivery</b>  •  "
+        f"{'Enabled' if config.protect_delivered_content else 'Disabled'}\n"
+        "🔎 <b>Search page size</b>  •  4 results\n"
+        "📱 <b>Interface</b>  •  native commands + inline dashboard"
     )
 
 

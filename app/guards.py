@@ -4,11 +4,12 @@ import logging
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import InlineKeyboardButton, User
+from aiogram.types import User
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .config import Config
 from .models import UserProfile, UserStatus
+from .presentation import ActionButton as InlineKeyboardButton
 from .repositories import UserRepository
 from .utils import safe_html
 
@@ -39,10 +40,13 @@ async def ensure_registered(
             try:
                 await bot.send_message(
                     owner_id,
-                    "New access request\n\n"
-                    f"Name: {safe_html(actor.full_name)}\n"
-                    f"Username: @{safe_html(actor.username) if actor.username else 'None'}\n"
-                    f"User ID: <code>{actor.id}</code>",
+                    "🕓 <b>NEW ACCESS REQUEST</b>\n"
+                    "<blockquote>A new user is waiting for your decision.</blockquote>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 <b>Name</b>  •  {safe_html(actor.full_name)}\n"
+                    "🔗 <b>Username</b>  •  "
+                    f"@{safe_html(actor.username) if actor.username else 'Not set'}\n"
+                    f"🆔 <b>User ID</b>  •  <code>{actor.id}</code>",
                     reply_markup=builder.as_markup(),
                 )
             except TelegramAPIError:
