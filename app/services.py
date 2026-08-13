@@ -27,6 +27,8 @@ class SearchSession:
     selectable: bool = False
     result_heading: str = "SEARCH RESULTS"
     selected_content_ids: set[str] = field(default_factory=set)
+    alphabet_filter: str | None = None
+    context: str = "catalog"
 
 
 class SearchSessionStore:
@@ -42,6 +44,7 @@ class SearchSessionStore:
         *,
         selectable: bool = False,
         result_heading: str = "SEARCH RESULTS",
+        context: str = "catalog",
     ) -> SearchSession:
         self.prune()
         token = make_id("q", 4).split("_", 1)[1]
@@ -53,6 +56,7 @@ class SearchSessionStore:
             time.monotonic(),
             selectable=selectable,
             result_heading=result_heading,
+            context=context,
         )
         self._sessions[token] = session
         return session

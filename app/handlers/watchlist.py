@@ -9,19 +9,22 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..config import Config
 from ..guards import access_denied_text, can_use_bot, ensure_registered
-from ..models import UserProfile, UserStatus
+from ..models import ContentRecord, UserProfile, UserStatus
 from ..panels import PanelManager
 from ..presentation import ActionButton as InlineKeyboardButton
 from ..repositories import CatalogRepository, UserRepository
-from ..services import CatalogQueryService
+from ..services import CatalogQueryService, SearchSession, SearchSessionStore
 from ..ui import (
     CODE_WATCH,
     public_watchlist_directory,
     watchlist_add_method,
+    watchlist_alphabet_picker,
     watchlist_category_picker,
     watchlist_entries,
     watchlist_entry_detail,
     watchlist_home,
+    watchlist_library_results,
+    watchlist_library_status_picker,
     watchlist_status_picker,
 )
 from ..utils import compact_label, safe_html
@@ -44,6 +47,7 @@ class WatchlistAddState(StatesGroup):
     manual_status = State()
     catalog_query = State()
     catalog_status = State()
+    community_name = State()
 
 
 async def _active_callback(
@@ -56,6 +60,32 @@ async def _active_callback(
         await callback.answer(access_denied_text(profile), show_alert=True)
         return None
     return profile
+
+
+def _watchlist_library_session(
+    sessions: SearchSessionStore,
+    token: str,
+    user_id: int,
+) -> SearchSession | None:
+    session = sessions.get(token, user_id)
+    if session is None or session.context != "watchlist_library":
+        return None
+    return session
+
+
+def _watchlist_library_contents(
+    session: SearchSession,
+    catalog: CatalogRepository,
+) -> list[ContentRecord]:
+    return [
+        content
+        for content_id in session.content_ids
+        if (content := catalog.get_content(content_id)) is not None
+    ]
+
+
+def _saved_catalog_ids(profile: UserProfile) -> set[str]:
+    return {entry.content_id for entry in profile.watchlist.values() if entry.content_id}
 
 
 async def _show_watchlist_message(
@@ -238,11 +268,259 @@ async def catalog_add_start(
     if await _active_callback(callback, users, config) is None:
         return
     await state.clear()
-    text, markup = watchlist_category_picker(catalog.list_categories(), "wacc", "Catalog title")
+    text, markup = watchlist_category_picker(
+        catalog.list_categories(),
+        "wlbc",
+        "Choose a library collection",
+    )
     await callback.answer()
     await edit_screen(callback, text, markup)
 
 
+@router.callback_query(F.data.startswith("wlbc:"))
+async def watchlist_library_category_selected(
+    callback: CallbackQuery,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    query: CatalogQueryService,
+    sessions: SearchSessionStore,
+    config: Config,
+) -> None:
+    profile = await _active_callback(callback, users, config)
+    if profile is None:
+        return
+    category_id = (callback.data or "").split(":", 1)[1]
+    category = catalog.get_category(category_id)
+    if category is None or not category.enabled:
+        await callback.answer("Category is unavailable.", show_alert=True)
+        return
+    contents = query.browse_category(category.id)
+    session = sessions.create(
+        callback.from_user.id,
+        category.name,
+        [content.id for content in contents],
+        selectable=True,
+        result_heading="WATCHLIST LIBRARY",
+        context="watchlist_library",
+    )
+    text, markup = watchlist_library_results(
+        session,
+        contents,
+        0,
+        saved_content_ids=_saved_catalog_ids(profile),
+    )
+    await callback.answer()
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(F.data.startswith("wlbp:"))
+async def watchlist_library_page(
+    callback: CallbackQuery,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    sessions: SearchSessionStore,
+    config: Config,
+) -> None:
+    profile = await _active_callback(callback, users, config)
+    if profile is None:
+        return
+    _, token, page_text = (callback.data or "").split(":", 2)
+    session = _watchlist_library_session(sessions, token, callback.from_user.id)
+    if session is None:
+        await callback.answer(
+            "This library selection expired. Open Add Title again.", show_alert=True
+        )
+        return
+    contents = _watchlist_library_contents(session, catalog)
+    available_ids = {content.id for content in contents}
+    session.selected_content_ids.intersection_update(available_ids)
+    text, markup = watchlist_library_results(
+        session,
+        contents,
+        int(page_text),
+        saved_content_ids=_saved_catalog_ids(profile),
+    )
+    await callback.answer()
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(F.data.startswith("wlbt:"))
+async def watchlist_library_toggle(
+    callback: CallbackQuery,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    sessions: SearchSessionStore,
+    config: Config,
+) -> None:
+    profile = await _active_callback(callback, users, config)
+    if profile is None:
+        return
+    _, token, content_id, page_text = (callback.data or "").split(":", 3)
+    session = _watchlist_library_session(sessions, token, callback.from_user.id)
+    if session is None or content_id not in session.content_ids:
+        await callback.answer(
+            "This library selection expired. Open Add Title again.", show_alert=True
+        )
+        return
+    if catalog.get_content(content_id) is None:
+        await callback.answer("That title is no longer available.", show_alert=True)
+        return
+    if content_id in session.selected_content_ids:
+        session.selected_content_ids.remove(content_id)
+    elif len(session.selected_content_ids) >= 25:
+        await callback.answer("You can select up to 25 titles at once.", show_alert=True)
+        return
+    else:
+        session.selected_content_ids.add(content_id)
+    contents = _watchlist_library_contents(session, catalog)
+    text, markup = watchlist_library_results(
+        session,
+        contents,
+        int(page_text),
+        saved_content_ids=_saved_catalog_ids(profile),
+    )
+    await callback.answer(f"{len(session.selected_content_ids)} selected")
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(F.data.startswith("wlba:"))
+async def watchlist_library_alphabet(
+    callback: CallbackQuery,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    sessions: SearchSessionStore,
+    config: Config,
+) -> None:
+    if await _active_callback(callback, users, config) is None:
+        return
+    _, token, _page_text = (callback.data or "").split(":", 2)
+    session = _watchlist_library_session(sessions, token, callback.from_user.id)
+    if session is None:
+        await callback.answer(
+            "This library selection expired. Open Add Title again.", show_alert=True
+        )
+        return
+    text, markup = watchlist_alphabet_picker(
+        session,
+        _watchlist_library_contents(session, catalog),
+    )
+    await callback.answer()
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(F.data.startswith("wlaf:"))
+async def watchlist_library_alphabet_selected(
+    callback: CallbackQuery,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    sessions: SearchSessionStore,
+    config: Config,
+) -> None:
+    profile = await _active_callback(callback, users, config)
+    if profile is None:
+        return
+    _, token, code = (callback.data or "").split(":", 2)
+    session = _watchlist_library_session(sessions, token, callback.from_user.id)
+    if session is None:
+        await callback.answer(
+            "This library selection expired. Open Add Title again.", show_alert=True
+        )
+        return
+    if code == "*":
+        session.alphabet_filter = None
+    elif code == "0":
+        session.alphabet_filter = "#"
+    elif len(code) == 1 and "A" <= code <= "Z":
+        session.alphabet_filter = code
+    else:
+        await callback.answer("Invalid alphabet filter.", show_alert=True)
+        return
+    contents = _watchlist_library_contents(session, catalog)
+    text, markup = watchlist_library_results(
+        session,
+        contents,
+        0,
+        saved_content_ids=_saved_catalog_ids(profile),
+    )
+    await callback.answer(f"Alphabet: {session.alphabet_filter or 'All'}")
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(F.data.startswith("wlbd:"))
+async def watchlist_library_add_selected(
+    callback: CallbackQuery,
+    users: UserRepository,
+    sessions: SearchSessionStore,
+    config: Config,
+) -> None:
+    if await _active_callback(callback, users, config) is None:
+        return
+    _, token, page_text = (callback.data or "").split(":", 2)
+    session = _watchlist_library_session(sessions, token, callback.from_user.id)
+    if session is None:
+        await callback.answer(
+            "This library selection expired. Open Add Title again.", show_alert=True
+        )
+        return
+    if not session.selected_content_ids:
+        await callback.answer("Select at least one title first.", show_alert=True)
+        return
+    text, markup = watchlist_library_status_picker(session, int(page_text))
+    await callback.answer()
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(F.data.startswith("wlbs:"))
+async def watchlist_library_status_selected(
+    callback: CallbackQuery,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    sessions: SearchSessionStore,
+    config: Config,
+) -> None:
+    if await _active_callback(callback, users, config) is None:
+        return
+    _, token, code, _page_text = (callback.data or "").split(":", 3)
+    session = _watchlist_library_session(sessions, token, callback.from_user.id)
+    status = CODE_WATCH.get(code)
+    if session is None or status is None:
+        await callback.answer(
+            "This library selection expired. Open Add Title again.", show_alert=True
+        )
+        return
+    selected = []
+    for content_id in session.content_ids:
+        if content_id not in session.selected_content_ids:
+            continue
+        content = catalog.get_content(content_id)
+        category = catalog.get_category(content.category_id) if content else None
+        if content is None or category is None or not category.enabled:
+            await callback.answer(
+                "One selected title is unavailable. Review the selection and try again.",
+                show_alert=True,
+            )
+            return
+        selected.append((content, category.name))
+    if not selected:
+        await callback.answer("Select at least one available title first.", show_alert=True)
+        return
+    result = await users.bulk_upsert_catalog_watchlist(
+        user_id=callback.from_user.id,
+        items=selected,
+        status=status,
+    )
+    session.selected_content_ids.clear()
+    profile = users.get_user(callback.from_user.id)
+    if profile is None:
+        raise RuntimeError("Registered watchlist owner disappeared")
+    text, markup = watchlist_home(profile)
+    await callback.answer(
+        f"✅ {result.created} added · {result.updated} updated",
+    )
+    await edit_screen(callback, text, markup)
+
+
+# Legacy typed-search catalog callbacks remain available for existing cards.
 @router.callback_query(F.data.startswith("wacc:"))
 async def catalog_category_selected(
     callback: CallbackQuery,
@@ -505,6 +783,78 @@ async def remove_entry(
     await edit_screen(callback, text, markup)
 
 
+@router.callback_query(F.data == "wln:edit")
+async def community_name_start(
+    callback: CallbackQuery,
+    users: UserRepository,
+    config: Config,
+    state: FSMContext,
+) -> None:
+    profile = await _active_callback(callback, users, config)
+    if profile is None:
+        return
+    await state.set_state(WatchlistAddState.community_name)
+    builder = InlineKeyboardBuilder()
+    if profile.watchlist_display_name:
+        builder.row(
+            InlineKeyboardButton(
+                text="↩️ Use my Telegram name",
+                callback_data="wln:reset",
+            )
+        )
+    builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data="menu:watchlist"))
+    await callback.answer()
+    await edit_screen(
+        callback,
+        "✏️ <b>CHANGE COMMUNITY NAME</b>\n"
+        "<blockquote>This name appears beside your public Watchlist.</blockquote>\n"
+        f"{DIVIDER}\n"
+        "Send a display name up to 40 characters. It does not change your Telegram profile.",
+        builder.as_markup(),
+    )
+
+
+@router.message(WatchlistAddState.community_name, F.text)
+async def community_name_received(
+    message: Message,
+    users: UserRepository,
+    state: FSMContext,
+    panels: PanelManager | None = None,
+) -> None:
+    if message.from_user is None:
+        return
+    try:
+        profile = await users.set_watchlist_display_name(message.from_user.id, message.text)
+    except ValueError as exc:
+        await message.answer(f"❌ {safe_html(exc)}")
+        return
+    await state.clear()
+    text, markup = watchlist_home(profile)
+    if panels and await panels.render_existing_workspace(
+        user_id=message.from_user.id,
+        text=text,
+        reply_markup=markup,
+    ):
+        return
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data == "wln:reset")
+async def community_name_reset(
+    callback: CallbackQuery,
+    users: UserRepository,
+    config: Config,
+    state: FSMContext,
+) -> None:
+    if await _active_callback(callback, users, config) is None:
+        return
+    profile = await users.set_watchlist_display_name(callback.from_user.id, None)
+    await state.clear()
+    text, markup = watchlist_home(profile)
+    await callback.answer("Community name reset.")
+    await edit_screen(callback, text, markup)
+
+
 @router.callback_query(F.data.startswith("wlvis:"))
 async def watchlist_visibility(
     callback: CallbackQuery,
@@ -514,10 +864,14 @@ async def watchlist_visibility(
     profile = await _active_callback(callback, users, config)
     if profile is None:
         return
-    is_public = callback.data.split(":", 1)[1] == "1"
-    updated = await users.set_watchlist_visibility(profile.telegram_user_id, is_public)
+    is_public = (callback.data or "").split(":", 1)[1] == "1"
+    try:
+        updated = await users.set_watchlist_visibility(profile.telegram_user_id, is_public)
+    except ValueError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
     text, markup = watchlist_home(updated)
-    await callback.answer("🌐 Watchlist shared." if is_public else "🔒 Watchlist is now private.")
+    await callback.answer("🌐 Community Watchlists are always public.")
     await edit_screen(callback, text, markup)
 
 
@@ -548,8 +902,8 @@ async def shared_watchlist(
         return
     _, owner_id_text, page_text = callback.data.split(":", 2)
     owner = users.get_user(int(owner_id_text))
-    if owner is None or owner.status != UserStatus.ACTIVE or not owner.watchlist_public:
-        await callback.answer("This watchlist is private or unavailable.", show_alert=True)
+    if owner is None or owner.status != UserStatus.ACTIVE:
+        await callback.answer("This watchlist is unavailable.", show_alert=True)
         return
     entries = sorted(owner.watchlist.values(), key=lambda item: item.updated_at, reverse=True)
     text, markup = watchlist_entries(owner, entries, int(page_text), own=False)
@@ -568,8 +922,8 @@ async def shared_watchlist_entry(
         return
     _, owner_id_text, entry_id, page_text = callback.data.split(":", 3)
     owner = users.get_user(int(owner_id_text))
-    if owner is None or owner.status != UserStatus.ACTIVE or not owner.watchlist_public:
-        await callback.answer("This watchlist is private or unavailable.", show_alert=True)
+    if owner is None or owner.status != UserStatus.ACTIVE:
+        await callback.answer("This watchlist is unavailable.", show_alert=True)
         return
     entry = owner.watchlist.get(entry_id)
     if entry is None:

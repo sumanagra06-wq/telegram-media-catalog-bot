@@ -71,19 +71,19 @@ def test_primary_dashboards_use_semantic_colors_without_custom_emoji_dependencie
         telegram_user_id=42,
         first_name="Alice",
         status=UserStatus.ACTIVE,
-        watchlist_public=False,
+        watchlist_display_name="Cinema Club",
     )
     watchlist_text, watchlist_markup = watchlist_home(user)
     watchlist = _by_callback(watchlist_markup)
     assert "MY WATCHLIST" in watchlist_text
     assert watchlist["wla:start"].style == "success"
     assert watchlist["wlm:0"].style == "primary"
-    assert watchlist["wlvis:1"].style == "success"
+    assert watchlist["wln:edit"].style == "primary"
     assert watchlist["menu:home"].style is None
+    assert "Cinema Club" in watchlist_text
+    assert "Always public" in watchlist_text
+    assert not any(callback.startswith("wlvis:") for callback in watchlist)
 
-    user.watchlist_public = True
-    public_watchlist = _by_callback(watchlist_home(user)[1])
-    assert public_watchlist["wlvis:0"].style is None
     status_picker = _by_callback(watchlist_status_picker("Arrival", "wams")[1])
     assert status_picker["menu:watchlist"].style is None
 

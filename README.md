@@ -22,7 +22,7 @@ A private-channel media catalog for movies and series. Telegram stores both the 
 - Movie navigation: title → language/quality variant → protected file
 - Dedicated Watchlist panel with manual-title and existing-catalog add flows
 - Dynamic category selection and exactly three statuses: To Watch, On Hold, Completed
-- Public community watchlists by default, with per-user private visibility and read-only viewing
+- Always-public, read-only community watchlists with a user-editable community display name
 - Owner-only, double-confirmed catalog-title removal that deletes every file record, attempts source-post deletion, and tracks required manual cleanup
 - Removed source tombstones prevent edited posts from silently re-indexing; failed Telegram deletions remain retryable
 - Public access initially; owner can switch to approval or allowlist
@@ -199,6 +199,10 @@ The bot sends ranked title buttons. Selecting a series opens seasons and then av
 
 Search, Browse, and Recently Added results show a separate `☐`/`✅` toggle beside each title. Selections remain checked across result pages. Users can select up to 25 titles, choose **Add Selected**, then assign To Watch, On Hold, or Completed to the whole selection in one atomic database update. The adjacent title button still opens normal details and protected delivery.
 
+Watchlist → Add a title → Choose from the library now opens each dynamic collection as a complete alphabetical catalog. Titles are paginated, both the checkbox and adjacent title button toggle selection, an alphabet picker jumps directly to A–Z or `#`, and selections survive page/alphabet changes. A `📚` marker identifies titles already saved before a bulk status update.
+
+After any successful movie, episode, variant, or season-pack delivery, the old temporary workspace is removed and a fresh dashboard card is posted below the delivered file. This keeps the controls at the bottom of the chat without creating two active workspaces.
+
 The owner's pinned card is the same user dashboard with one additional Admin Control Center entry. Owner authorization is still enforced by the handler, not merely by hiding the button. Existing commands and legacy callbacks remain operational during the new-panel test period.
 
 User native commands are intentionally short:
@@ -217,12 +221,13 @@ The owner receives additional scoped commands for administration.
 
 Open `/watchlist` or Main Menu → My watchlist. The panel supports:
 
-1. **From catalog** — choose any currently enabled dynamic category, type a search term, select an indexed title, and choose To Watch, On Hold, or Completed.
+1. **From catalog** — choose any enabled dynamic category, browse every indexed title alphabetically, jump by initial, tick one or more titles across pages, and assign one status to the selection.
 2. **Manual title** — choose a dynamic category, type any title up to 160 characters, and choose one of the same three statuses.
 3. **My titles** — view entries, change status, remove an entry, or open its catalog page when one is linked and still available.
-4. **Community lists** — browse other active users' public watchlists read-only. Shared viewers cannot change or remove another user's entries.
+4. **Community lists** — browse other active users' Watchlists read-only. Shared viewers cannot change or remove another user's entries.
+5. **Community name** — choose a display name up to 40 characters without changing the Telegram profile; the real `@username` remains visible in the directory when available.
 
-Watchlists are public to other active bot users by default, as requested. Each user can switch their own list to private from the Watchlist panel. A catalog title removed by the owner remains as a text-only watchlist entry; catalog removal does not edit personal watchlists.
+Community Watchlists are always public to other active bot users and cannot be made private. The previous privacy callback remains safely handled for old cards but rejects private-mode requests. A catalog title removed by the owner remains as a text-only Watchlist entry; catalog removal does not edit personal Watchlists.
 
 ## Permanent catalog-title removal
 
@@ -270,7 +275,7 @@ pip-audit -r requirements.txt
 bandit -q -r app
 ```
 
-The test suite covers the supplied real caption formats, split archives, metadata allowlisting, dynamic categories, duplicate update idempotency, search ordering, series grouping, exact watchlist statuses, snapshot rollback/fallback, Telegram callback-size limits, pinned-dashboard recovery, concurrent workspace reuse, sliding expiry, restart cleanup, checkbox state across pages, owner authorization, and atomic bulk Watchlist rollback.
+The test suite covers the supplied real caption formats, split archives, metadata allowlisting, dynamic categories, duplicate update idempotency, search ordering, series grouping, exact watchlist statuses, snapshot rollback/fallback, Telegram callback-size limits, pinned-dashboard recovery, concurrent workspace reuse, post-delivery control relocation, sliding expiry, restart cleanup, checkbox state across pages and alphabet filters, editable community names, always-public enforcement, owner authorization, and atomic bulk Watchlist rollback.
 
 Run the webhook application:
 

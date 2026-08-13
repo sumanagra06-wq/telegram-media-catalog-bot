@@ -14,7 +14,7 @@ from app.handlers.panel import (
     panel_recent_callback,
     panel_toggle_selection,
 )
-from app.handlers.search import plain_title_search
+from app.handlers.search import file_callback, plain_title_search
 from app.metadata import parse_metadata
 from app.models import CatalogState, MediaType, UsersState, WatchStatus
 from app.panels import PanelManager
@@ -31,12 +31,22 @@ class FakePanelBot:
         self.edited = []
         self.pinned = []
         self.deleted = []
+        self.copied = []
+        self.events = []
         self.unavailable_edits = set()
 
     async def send_message(self, chat_id, text, **kwargs):
         message = SimpleNamespace(message_id=self.next_message_id)
         self.next_message_id += 1
         self.sent.append((chat_id, text, kwargs, message.message_id))
+        self.events.append(("send", message.message_id))
+        return message
+
+    async def copy_message(self, **kwargs):
+        message = SimpleNamespace(message_id=self.next_message_id)
+        self.next_message_id += 1
+        self.copied.append(kwargs)
+        self.events.append(("copy", message.message_id))
         return message
 
     async def edit_message_text(self, *, chat_id, message_id, text, **kwargs):
@@ -187,6 +197,51 @@ async def test_workspace_reuses_one_message_and_sliding_expiry_deletes_it():
     await asyncio.sleep(0.05)
     assert users.get_user(42).panel_workspace_message_id is None
     assert bot.deleted[-1] == (42, 100)
+    await panels.shutdown()
+
+
+async def test_successful_delivery_moves_dashboard_controls_below_the_file():
+    catalog, users = await _repositories()
+    await _register(users)
+    await users.set_panel_dashboard_message(42, 50)
+    category = await catalog.add_category("Movies", -10010, "Movies")
+    record, _, _ = await catalog.upsert_file(
+        category_id=category.id,
+        source_chat_id=-10010,
+        source_message_id=1,
+        telegram_file_id="file-1",
+        telegram_file_unique_id="unique-1",
+        media_type=MediaType.VIDEO,
+        metadata=parse_metadata("Arrival 2016 1080p English mkv"),
+    )
+    bot = FakePanelBot()
+    panels = PanelManager(bot, users)
+    _, markup = panel_dashboard(False)
+    first_workspace = await panels.render_workspace(
+        user_id=42,
+        text="File details",
+        reply_markup=markup,
+    )
+    user = SimpleNamespace(
+        id=42,
+        first_name="Alice",
+        last_name=None,
+        username="alice",
+        language_code="en",
+    )
+    callback = FakeCallback(user, f"fl:{record.id}", first_workspace)
+    revision_before_delivery = users.snapshot().revision
+
+    await file_callback(callback, bot, catalog, users, _config(), panels)
+
+    profile = users.get_user(42)
+    assert users.snapshot().revision == revision_before_delivery + 1
+    assert bot.events == [("send", 100), ("copy", 101), ("send", 102)]
+    assert profile.panel_dashboard_message_id == 50
+    assert profile.panel_workspace_message_id == 102
+    assert (42, 100) in bot.deleted
+    assert "MEDIA LIBRARY DASHBOARD" in bot.sent[-1][1]
+    assert "file is above" in bot.sent[-1][1]
     await panels.shutdown()
 
 

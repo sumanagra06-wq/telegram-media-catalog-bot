@@ -154,6 +154,40 @@ def panel_workspace_home(is_owner: bool) -> tuple[str, InlineKeyboardMarkup]:
     )
 
 
+def post_delivery_dashboard(is_owner: bool) -> tuple[str, InlineKeyboardMarkup]:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🔎 Search", callback_data="p:search", style="primary"),
+        InlineKeyboardButton(text="🗂 Browse", callback_data="p:browse", style="primary"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="✨ Recently added", callback_data="p:recent"),
+        InlineKeyboardButton(text="📚 Watchlist", callback_data="p:watchlist", style="primary"),
+    )
+    if is_owner:
+        builder.row(
+            InlineKeyboardButton(
+                text="🛡 Admin Control Center",
+                callback_data="p:admin",
+                style="primary",
+            )
+        )
+    builder.row(
+        InlineKeyboardButton(text="❓ Help", callback_data="p:help"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="p:close"),
+    )
+    return (
+        (
+            "✨ <b>MEDIA LIBRARY DASHBOARD</b>\n"
+            "<blockquote>Your file is above • what would you like next?</blockquote>\n"
+            f"{DIVIDER}\n"
+            "The controls were moved below the delivered file so you do not need to scroll back.\n\n"
+            "⏱ This temporary dashboard closes after 5 quiet minutes."
+        ),
+        builder.as_markup(),
+    )
+
+
 def panel_browse_categories(categories: list[Category]) -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
     icons = {"single": "🎬", "episodic": "📺", "mixed": "🗂"}
@@ -613,6 +647,10 @@ def pack_screen(
     )
 
 
+def watchlist_display_name(user: UserProfile) -> str:
+    return user.watchlist_display_name or user.first_name
+
+
 def watchlist_home(user: UserProfile) -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -628,23 +666,22 @@ def watchlist_home(user: UserProfile) -> tuple[str, InlineKeyboardMarkup]:
     )
     builder.row(
         InlineKeyboardButton(
-            text="🔒 Make my list private" if user.watchlist_public else "🌐 Share my list",
-            callback_data=f"wlvis:{0 if user.watchlist_public else 1}",
-            style=None if user.watchlist_public else "success",
+            text="✏️ Change community name",
+            callback_data="wln:edit",
+            style="primary",
         )
     )
     builder.row(InlineKeyboardButton(text="🏠 Main menu", callback_data="menu:home"))
-    visibility_icon = "🌐" if user.watchlist_public else "🔒"
-    visibility = "Shared with active users" if user.watchlist_public else "Private"
     return (
         (
             "📚 <b>MY WATCHLIST</b>\n"
             "<blockquote>Plan it. Pause it. Complete it.</blockquote>\n"
             f"{DIVIDER}\n"
             f"🎞 Saved titles  •  <b>{len(user.watchlist)}</b>\n"
-            f"{visibility_icon} Visibility  •  <b>{visibility}</b>\n"
+            f"👤 Community name  •  <b>{safe_html(watchlist_display_name(user))}</b>\n"
+            "🌐 Visibility  •  <b>Always public</b>\n"
             f"{DIVIDER}\n"
-            "Add an indexed title or save anything manually."
+            "Add one custom title or select several library titles together."
         ),
         builder.as_markup(),
     )
@@ -654,7 +691,7 @@ def watchlist_add_method() -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="🎞 Choose from the library", callback_data="wla:catalog", style="primary"
+            text="☑️ Select from the library", callback_data="wla:catalog", style="primary"
         )
     )
     builder.row(
@@ -666,7 +703,7 @@ def watchlist_add_method() -> tuple[str, InlineKeyboardMarkup]:
     return (
         (
             "➕ <b>ADD TO WATCHLIST</b>\n"
-            "<blockquote>Save something from the library or type your own.</blockquote>\n"
+            "<blockquote>Select several library titles or type one custom title.</blockquote>\n"
             f"{DIVIDER}\n"
             "How would you like to add it?"
         ),
@@ -678,24 +715,217 @@ def watchlist_category_picker(
     categories: list[Category], callback_prefix: str, heading: str
 ) -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
+    icons = {"single": "🎬", "episodic": "📺", "mixed": "🗂"}
     for category in categories:
         builder.row(
             InlineKeyboardButton(
-                text=f"🗂 {compact_label(category.name)}",
+                text=f"{icons[category.mode.value]} {compact_label(category.name)}",
                 callback_data=f"{callback_prefix}:{category.id}",
                 style="primary",
             )
         )
     builder.row(InlineKeyboardButton(text="◀️ Add title", callback_data="wla:start"))
+    prompt = (
+        "Which collection would you like to browse?"
+        if callback_prefix == "wlbc"
+        else "Where does this title belong?"
+    )
     text = (
         f"🗂 <b>{safe_html(heading.upper())}</b>\n"
         "<blockquote>Step 1 of 3 • choose a collection</blockquote>\n"
         f"{DIVIDER}\n"
-        "Where does this title belong?"
+        f"{prompt}"
     )
     if not categories:
         text += "\n\n🫙 <i>No enabled categories are available.</i>"
     return text, builder.as_markup()
+
+
+def watchlist_title_initial(title: str) -> str:
+    stripped = title.strip()
+    if not stripped:
+        return "#"
+    initial = stripped[0].upper()
+    return initial if "A" <= initial <= "Z" else "#"
+
+
+def watchlist_library_filter(
+    session: SearchSession,
+    contents: list[ContentRecord],
+) -> list[ContentRecord]:
+    alphabet = session.alphabet_filter
+    if alphabet is None:
+        return contents
+    return [content for content in contents if watchlist_title_initial(content.title) == alphabet]
+
+
+def watchlist_library_results(
+    session: SearchSession,
+    contents: list[ContentRecord],
+    page: int,
+    *,
+    saved_content_ids: set[str] | None = None,
+    page_size: int = 6,
+) -> tuple[str, InlineKeyboardMarkup]:
+    filtered = watchlist_library_filter(session, contents)
+    visible, page, pages = page_slice(filtered, page, page_size)
+    selected = session.selected_content_ids
+    saved_content_ids = saved_content_ids or set()
+    builder = InlineKeyboardBuilder()
+    for content in visible:
+        checked = content.id in selected
+        marker = "📚 " if content.id in saved_content_ids else ""
+        callback_data = f"wlbt:{session.token}:{content.id}:{page}"
+        builder.row(
+            InlineKeyboardButton(
+                text="✅" if checked else "☐",
+                callback_data=callback_data,
+                style="success" if checked else None,
+            ),
+            InlineKeyboardButton(
+                text=compact_label(
+                    f"{marker}{content.title} ({content.year or 'Unknown'})",
+                    52,
+                ),
+                callback_data=callback_data,
+                style="primary",
+            ),
+        )
+    navigation: list[InlineKeyboardButton] = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="◀️ Previous",
+                callback_data=f"wlbp:{session.token}:{page - 1}",
+            )
+        )
+    if page + 1 < pages:
+        navigation.append(
+            InlineKeyboardButton(
+                text="Next ▶️",
+                callback_data=f"wlbp:{session.token}:{page + 1}",
+            )
+        )
+    if navigation:
+        builder.row(*navigation)
+    alphabet_label = session.alphabet_filter or "All"
+    builder.row(
+        InlineKeyboardButton(
+            text=f"🔤 Alphabet · {alphabet_label}",
+            callback_data=f"wlba:{session.token}:{page}",
+            style="primary",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=f"➕ Add Selected · {len(selected)}",
+            callback_data=f"wlbd:{session.token}:{page}",
+            style="success" if selected else None,
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(text="◀️ Collections", callback_data="wla:catalog"),
+        InlineKeyboardButton(text="✖️ Cancel", callback_data="menu:watchlist"),
+    )
+    text = (
+        "☑️ <b>CHOOSE LIBRARY TITLES</b>\n"
+        f"<blockquote>{safe_html(session.query)} • alphabetical catalog</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🎞 Matching titles: <b>{len(filtered)}</b>  •  Selected: <b>{len(selected)}/25</b>\n"
+        f"🔤 Alphabet: <b>{safe_html(alphabet_label)}</b>  •  {_page_line(page, pages)}\n\n"
+        "Tap ☐ or the title to select it. 📚 marks a title already in your Watchlist."
+    )
+    if not filtered:
+        text += "\n\n🫙 <i>No titles are available under this alphabet.</i>"
+    return text, builder.as_markup()
+
+
+def watchlist_alphabet_picker(
+    session: SearchSession,
+    contents: list[ContentRecord],
+) -> tuple[str, InlineKeyboardMarkup]:
+    available = {watchlist_title_initial(content.title) for content in contents}
+    builder = InlineKeyboardBuilder()
+    buttons = [
+        InlineKeyboardButton(
+            text="✅ All" if session.alphabet_filter is None else "All",
+            callback_data=f"wlaf:{session.token}:*",
+            style="success" if session.alphabet_filter is None else "primary",
+        )
+    ]
+    for letter in [*"ABCDEFGHIJKLMNOPQRSTUVWXYZ", "#"]:
+        if letter not in available:
+            continue
+        buttons.append(
+            InlineKeyboardButton(
+                text=f"✅ {letter}" if session.alphabet_filter == letter else letter,
+                callback_data=f"wlaf:{session.token}:{'0' if letter == '#' else letter}",
+                style="success" if session.alphabet_filter == letter else "primary",
+            )
+        )
+    for index in range(0, len(buttons), 6):
+        builder.row(*buttons[index : index + 6])
+    builder.row(
+        InlineKeyboardButton(
+            text="◀️ Back to titles",
+            callback_data=f"wlbp:{session.token}:0",
+        )
+    )
+    return (
+        (
+            "🔤 <b>JUMP BY ALPHABET</b>\n"
+            f"<blockquote>{safe_html(session.query)} • direct title filter</blockquote>\n"
+            f"{DIVIDER}\n"
+            "Choose a letter to see only titles beginning with it. "
+            "Your current selections stay checked."
+        ),
+        builder.as_markup(),
+    )
+
+
+def watchlist_library_status_picker(
+    session: SearchSession,
+    page: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    count = len(session.selected_content_ids)
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="🕓 To Watch",
+            callback_data=f"wlbs:{session.token}:t:{page}",
+            style="primary",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="⏸ On Hold",
+            callback_data=f"wlbs:{session.token}:h:{page}",
+            style="primary",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Completed",
+            callback_data=f"wlbs:{session.token}:c:{page}",
+            style="success",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="◀️ Back to titles",
+            callback_data=f"wlbp:{session.token}:{page}",
+        ),
+        InlineKeyboardButton(text="✖️ Cancel", callback_data="menu:watchlist"),
+    )
+    return (
+        (
+            "📚 <b>ADD SELECTED TITLES</b>\n"
+            f"<blockquote>{count} title{'s' if count != 1 else ''} selected</blockquote>\n"
+            f"{DIVIDER}\n"
+            "Choose one status for every selected library title."
+        ),
+        builder.as_markup(),
+    )
 
 
 def watchlist_status_picker(title: str, callback_prefix: str) -> tuple[str, InlineKeyboardMarkup]:
@@ -777,7 +1007,7 @@ def watchlist_entries(
         ),
         InlineKeyboardButton(text="🏠 Home", callback_data="menu:home"),
     )
-    name = "MY TITLES" if own else f"{owner.first_name}’s watchlist"
+    name = "MY TITLES" if own else f"{watchlist_display_name(owner)}’s watchlist"
     status_counts = {status: 0 for status in WatchStatus}
     for entry in entries:
         status_counts[entry.status] += 1
@@ -831,7 +1061,11 @@ def watchlist_entry_detail(
         )
     builder.row(
         InlineKeyboardButton(
-            text="◀️ My titles" if own else f"◀️ {owner.first_name}’s list",
+            text=(
+                "◀️ My titles"
+                if own
+                else compact_label(f"◀️ {watchlist_display_name(owner)}’s list", 58)
+            ),
             callback_data=(f"wlm:{page}" if own else f"wlv:{owner.telegram_user_id}:{page}"),
         )
     )
@@ -858,7 +1092,8 @@ def public_watchlist_directory(
         builder.row(
             InlineKeyboardButton(
                 text=compact_label(
-                    f"👤 {user.first_name}{username} · {len(user.watchlist)} titles", 58
+                    f"👤 {watchlist_display_name(user)}{username} · {len(user.watchlist)} titles",
+                    58,
                 ),
                 callback_data=f"wlv:{user.telegram_user_id}:0",
                 style="primary",

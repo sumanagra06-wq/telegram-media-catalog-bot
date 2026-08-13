@@ -723,7 +723,7 @@ class UserRepository:
         return self.store.snapshot()
 
     async def migrate_schema(self) -> bool:
-        needs_migration = self.store.state.schema_version < 3 or any(
+        needs_migration = self.store.state.schema_version < 4 or any(
             not entry.id or key != entry.id
             for user in self.store.state.users.values()
             for key, entry in user.watchlist.items()
@@ -744,9 +744,12 @@ class UserRepository:
                     entry.id = entry_id
                     migrated[entry_id] = entry
                 user.watchlist = migrated
+                if not user.watchlist_public:
+                    user.watchlist_public = True
+                    changed = True
                 if changed:
                     user.updated_at = utcnow_iso()
-            state.schema_version = 3
+            state.schema_version = 4
             return True
 
         return await self.store.mutate(mutate)
@@ -879,6 +882,25 @@ class UserRepository:
             user = state.users.get(str(user_id))
             if user is None:
                 raise ValueError("User not found")
+            user.panel_workspace_message_id = message_id
+            user.updated_at = utcnow_iso()
+            return user.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def replace_panel_workspace_message(
+        self,
+        user_id: int,
+        message_id: int,
+        *,
+        expected_previous_id: int | None,
+    ) -> UserProfile:
+        def mutate(state: UsersState) -> UserProfile:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            if user.panel_workspace_message_id != expected_previous_id:
+                raise ValueError("Workspace changed while it was being replaced")
             user.panel_workspace_message_id = message_id
             user.updated_at = utcnow_iso()
             return user.model_copy(deep=True)
@@ -1087,11 +1109,47 @@ class UserRepository:
         return await self.store.mutate(mutate)
 
     async def set_watchlist_visibility(self, user_id: int, is_public: bool) -> UserProfile:
+        if not is_public:
+            raise ValueError("Community watchlists are always public")
+        current = self.store.state.users.get(str(user_id))
+        if current is None:
+            raise ValueError("User not found")
+        if current.watchlist_public:
+            return current.model_copy(deep=True)
+
         def mutate(state: UsersState) -> UserProfile:
             user = state.users.get(str(user_id))
             if user is None:
                 raise ValueError("User not found")
-            user.watchlist_public = is_public
+            user.watchlist_public = True
+            user.updated_at = utcnow_iso()
+            return user.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def set_watchlist_display_name(
+        self,
+        user_id: int,
+        display_name: str | None,
+    ) -> UserProfile:
+        if display_name is not None:
+            display_name = " ".join(display_name.split()).strip()
+            if not display_name:
+                raise ValueError("Community name cannot be empty")
+            if len(display_name) > 40:
+                raise ValueError("Community name must be 40 characters or fewer")
+        current = self.store.state.users.get(str(user_id))
+        if current is None:
+            raise ValueError("User not found")
+        if current.watchlist_display_name == display_name and current.watchlist_public:
+            return current.model_copy(deep=True)
+
+        def mutate(state: UsersState) -> UserProfile:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            user.watchlist_display_name = display_name
+            user.watchlist_public = True
             user.updated_at = utcnow_iso()
             return user.model_copy(deep=True)
 
@@ -1101,8 +1159,12 @@ class UserRepository:
         values = [
             user.model_copy(deep=True)
             for user in self.store.state.users.values()
-            if user.status == UserStatus.ACTIVE
-            and user.watchlist_public
-            and user.telegram_user_id != exclude_user_id
+            if user.status == UserStatus.ACTIVE and user.telegram_user_id != exclude_user_id
         ]
-        return sorted(values, key=lambda user: (user.first_name.casefold(), user.telegram_user_id))
+        return sorted(
+            values,
+            key=lambda user: (
+                (user.watchlist_display_name or user.first_name).casefold(),
+                user.telegram_user_id,
+            ),
+        )

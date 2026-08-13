@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import StateFilter
 from aiogram.types import CallbackQuery, Message
 
@@ -13,10 +13,12 @@ from ..models import MediaType
 from ..panels import PanelManager
 from ..repositories import CatalogRepository, UserRepository
 from ..services import CatalogQueryService, SearchSessionStore, delivery_caption
+from ..storage import StorageError
 from ..ui import (
     content_screen,
     no_results,
     pack_screen,
+    post_delivery_dashboard,
     search_results,
     season_screen,
     selectable_results,
@@ -222,6 +224,7 @@ async def episode_callback(
     query: CatalogQueryService,
     users: UserRepository,
     config: Config,
+    panels: PanelManager | None = None,
 ) -> None:
     if await _active_callback(callback, users, config) is None:
         return
@@ -236,7 +239,7 @@ async def episode_callback(
         return
     if len(variants) == 1:
         await callback.answer("Sending file…")
-        await _deliver_file(callback, variants[0].id, bot, catalog, config)
+        await _deliver_file(callback, variants[0].id, bot, catalog, config, panels)
         return
     text, markup = variants_screen(
         content,
@@ -274,12 +277,31 @@ async def pack_callback(
     await edit_screen(callback, text, markup)
 
 
+async def _post_delivery_controls(
+    user_id: int,
+    config: Config,
+    panels: PanelManager | None,
+) -> None:
+    if panels is None:
+        return
+    text, markup = post_delivery_dashboard(config.is_owner(user_id))
+    try:
+        await panels.move_workspace_to_bottom(
+            user_id=user_id,
+            text=text,
+            reply_markup=markup,
+        )
+    except (TelegramAPIError, StorageError, ValueError):
+        LOGGER.warning("Could not move post-delivery controls for user %s", user_id, exc_info=True)
+
+
 async def _deliver_file(
     callback: CallbackQuery,
     file_id: str,
     bot: Bot,
     catalog: CatalogRepository,
     config: Config,
+    panels: PanelManager | None = None,
 ) -> None:
     record = catalog.get_file(file_id)
     if record is None or not record.available:
@@ -329,6 +351,7 @@ async def _deliver_file(
                 await bot.send_video(video=record.telegram_file_id, **send_kwargs)
             else:
                 await bot.send_document(document=record.telegram_file_id, **send_kwargs)
+            await _post_delivery_controls(callback.from_user.id, config, panels)
             return
         except (TelegramBadRequest, TelegramForbiddenError):
             await catalog.mark_file_available(file_id, False)
@@ -348,6 +371,8 @@ async def _deliver_file(
                     )
                 except (TelegramBadRequest, TelegramForbiddenError):
                     LOGGER.info("Could not notify owner %s about unavailable file", owner_id)
+    else:
+        await _post_delivery_controls(callback.from_user.id, config, panels)
 
 
 @router.callback_query(F.data.startswith("fl:"))
@@ -357,9 +382,10 @@ async def file_callback(
     catalog: CatalogRepository,
     users: UserRepository,
     config: Config,
+    panels: PanelManager | None = None,
 ) -> None:
     if await _active_callback(callback, users, config) is None:
         return
     file_id = callback.data.split(":", 1)[1]
     await callback.answer("Sending file…")
-    await _deliver_file(callback, file_id, bot, catalog, config)
+    await _deliver_file(callback, file_id, bot, catalog, config, panels)

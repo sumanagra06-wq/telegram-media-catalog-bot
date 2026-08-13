@@ -244,10 +244,12 @@ async def test_manual_and_catalog_watchlist_panel_flows_and_public_read_only_vie
     unchanged = users.get_watchlist_entry(owner.id, owner_entry.id)
     assert unchanged.status == WatchStatus.COMPLETED
 
-    await users.set_watchlist_visibility(owner.id, False)
-    private_attempt = FakeCallback(viewer, f"wlv:{owner.id}:0")
-    await shared_watchlist(private_attempt, users, _config())
-    assert private_attempt.answers[-1][1]["show_alert"] is True
+    with pytest.raises(ValueError, match="always public"):
+        await users.set_watchlist_visibility(owner.id, False)
+    public_attempt = FakeCallback(viewer, f"wlv:{owner.id}:0")
+    await shared_watchlist(public_attempt, users, _config())
+    assert "Alice’s watchlist" in public_attempt.message.edits[-1][0]
+    assert users.get_user(owner.id).watchlist_public is True
     assert len(users.get_user(owner.id).watchlist) == 2
 
 
@@ -357,6 +359,7 @@ async def test_schema_migration_rekeys_legacy_watchlist_entries_once():
                 telegram_user_id=42,
                 first_name="Legacy",
                 status=UserStatus.ACTIVE,
+                watchlist_public=False,
                 watchlist={"c_legacy": legacy_entry},
             )
         },
@@ -370,9 +373,10 @@ async def test_schema_migration_rekeys_legacy_watchlist_entries_once():
     migrated = users.get_user(42)
     assert migrated is not None
     assert migrated.watchlist_public is True
+    assert migrated.watchlist_display_name is None
     assert migrated.panel_dashboard_message_id is None
     assert migrated.panel_workspace_message_id is None
-    assert users.snapshot().schema_version == 3
+    assert users.snapshot().schema_version == 4
     assert len(migrated.watchlist) == 1
     entry_id, entry = next(iter(migrated.watchlist.items()))
     assert entry_id == entry.id

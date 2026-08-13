@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramFor
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, TelegramObject
 
 from .repositories import UserRepository
+from .storage import StorageError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -265,6 +266,51 @@ class PanelManager:
                 user_id,
                 expected_message_id=message_id,
             )
+
+    async def move_workspace_to_bottom(
+        self,
+        *,
+        user_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup,
+    ) -> int:
+        task = self._expiry_tasks.pop(user_id, None)
+        if task is not None:
+            task.cancel()
+        async with self._user_lock(user_id):
+            profile = self.users.get_user(user_id)
+            if profile is None:
+                raise ValueError("User not found")
+            previous_id = profile.panel_workspace_message_id
+            if previous_id is not None:
+                try:
+                    await self.bot.delete_message(user_id, previous_id)
+                except TelegramAPIError:
+                    try:
+                        await self.bot.edit_message_reply_markup(
+                            chat_id=user_id,
+                            message_id=previous_id,
+                            reply_markup=None,
+                        )
+                    except TelegramAPIError:
+                        LOGGER.info(
+                            "Could not disable superseded workspace %s for user %s",
+                            previous_id,
+                            user_id,
+                        )
+            message = await self.bot.send_message(user_id, text, reply_markup=reply_markup)
+            try:
+                await self.users.replace_panel_workspace_message(
+                    user_id,
+                    message.message_id,
+                    expected_previous_id=previous_id,
+                )
+            except (StorageError, ValueError):
+                with suppress(TelegramAPIError):
+                    await self.bot.delete_message(user_id, message.message_id)
+                raise
+            self.touch(user_id, message.message_id)
+            return message.message_id
 
     async def cleanup_stale_workspaces(self) -> int:
         stale = [

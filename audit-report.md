@@ -13,6 +13,9 @@ This report records checks performed before packaging. It is not a claim that li
 - One persisted pinned dashboard plus one persisted/reused temporary workspace per user
 - Sliding five-minute workspace expiry, callback/message activity resets, restart cleanup, and concurrent-open serialization
 - Search/Browse/Recently Added checkbox emulation, cross-page selection, and atomic bulk Watchlist insertion
+- Alphabetical Watchlist-library browsing, A–Z/# jumps, pagination, persistent ticks and atomic status insertion
+- Always-public community Watchlists with editable, HTML-safe display names and visible usernames
+- Post-delivery workspace replacement below protected media without leaving two active workspaces
 - Unified owner dashboard with an authorization-checked Admin Control Center entry
 - Semantic Bot API button styles (`primary`, `success`, `danger`) with neutral secondary actions
 - Unicode-emoji labels and consistent HTML card hierarchy across user and owner screens
@@ -38,26 +41,29 @@ This report records checks performed before packaging. It is not a claim that li
 7. Preserved content IDs/watchlist relationships when correcting the only file's title or year.
 8. Added a versioned state base model, pinned production dependency versions, and clean Replit/Python runtime metadata.
 9. Fixed filename-style values after `Title:`/`Name:` so episode tokens never become part of the catalog identity; added persistence-boundary canonicalization and an idempotent startup migration that merges affected titles without re-uploading Telegram media.
-10. Replaced direct catalog-screen watchlist controls with a dedicated panel supporting dynamic categories, manual and indexed titles, explicit status selection, public-by-default read-only community lists, and a private visibility toggle. Added versioned migration for legacy entries.
+10. Replaced direct catalog-screen watchlist controls with a dedicated panel supporting dynamic categories, manual and indexed titles, explicit status selection, public-by-default read-only community lists, and the privacy toggle used in that release. Added versioned migration for legacy entries. The privacy policy is superseded by finding 17 below.
 11. Added owner-only, double-confirmed catalog-title removal. The catalog commit blocks delivery first, source tombstones prevent re-indexing, recent Telegram posts are deleted in batches, failures remain retryable, and old posts can be manually confirmed after Telegram's deletion window expires.
 12. Reworked the native Telegram interface into concise card-style screens with clear hierarchy, standard Unicode emoji, official semantic button colors, richer search/media/Watchlist/admin states, neutral back/cancel controls, and prominent double-confirmed destructive actions. Existing callback expressions remain present and no custom-emoji IDs are used.
 13. Added the command-optional interaction layer without removing the legacy layer: `/start` creates, recovers, updates and pins one dashboard; dashboard actions create or reuse one serialized workspace; all workspace callbacks and relevant text-input continuations reuse that message; inactivity deletes it after five minutes; startup removes stale workspace cards while preserving dashboards.
 14. Added selectable Search, Browse and Recently Added results with separate checkbox/title buttons, selection retention across pages, a 25-title safety bound, one status picker using only `to_watch`, `on_hold` and `completed`, and one atomic user-snapshot commit for the full bulk operation.
 15. Added per-user async locking so simultaneous dashboard/workspace opens cannot create duplicate new-system cards, plus message-reference compare-and-clear guards so an old expiry task cannot clear a newer workspace.
 16. Set pytest-asyncio's fixture loop scope explicitly so the warnings-as-errors audit remains clean with current tooling.
+17. Replaced the community privacy control with an editable 40-character community display name. Schema v4 converts every previously private list back to public, the repository rejects future private-mode requests, the old privacy callback remains handled for historical cards, and the real Telegram username remains visible in the community directory when available.
+18. Replaced the new Watchlist catalog-entry screen with a complete category catalog: case-insensitive alphabetical ordering, six titles per page, A–Z/# direct filtering, checkbox/title-button toggles, selection retention across filters and pages, already-saved markers, a 25-title bound, and atomic bulk status insertion. The former typed-search callbacks remain registered for historical cards.
+19. After successful protected delivery, the lifecycle manager deletes or disables the previous workspace and posts a fresh temporary dashboard below the file. The pinned dashboard remains untouched, the replacement becomes the sole active workspace, and delivery success is never rolled back if repositioning controls fails.
 
 ## Automated results at package time
 
 - Ruff lint: passed
 - Ruff formatting check: passed
 - Python compileall: passed
-- Pytest with warnings treated as errors: passed (84 tests)
-- Test coverage: 62% overall; parser 98%, snapshot storage 84%, repositories 74%, services 86%, panel handlers 61%, panel lifecycle manager 64%, UI 69%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
+- Pytest with warnings treated as errors: passed (87 tests)
+- Test coverage: 63% overall; parser 98%, snapshot storage 84%, repositories 73%, services 87%, panel handlers 61%, Watchlist handlers 56%, delivery/search handlers 48%, panel lifecycle manager 64%, UI 73%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
 - Bandit: passed; the required Railway `0.0.0.0` bind is explicitly documented/suppressed
 - pip-audit: passed, no known vulnerabilities in production requirements
 - Mypy: core configuration, models, parser, storage, repositories, services, panel lifecycle, UI and presentation modules passed; the new panel handler module also passed independently
-- Callback contract audit: zero baseline callback expressions are missing from UI, admin, Watchlist or guards; all legacy handlers and routes remain registered
-- Representative rendering audit: the previous 20-screen audit remains valid, and 9 additive panel screens passed Telegram HTML, text/button length, callback-size, style-value, and no-custom-emoji checks
+- Callback contract audit: all baseline admin, Watchlist-handler and guard expressions remain; the one intentionally removed UI expression is the now-forbidden privacy button, whose legacy handler remains registered and rejects private mode
+- Representative rendering audit: the previous 29 screens remain valid, and 8 new community/alphabet/post-delivery screens passed Telegram HTML, text/button length, callback-size, style-value, and no-custom-emoji checks
 - Placeholder scan: no TODO/FIXME/XXX/HACK/NotImplemented markers
 - Secret and sensitive-file scans: clean
 
@@ -92,7 +98,7 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Idempotent repair of a persisted six-title/six-file snapshot into one title/six files while preserving Telegram file IDs and source message references
 - Corrected File Database repair cards using one shared content ID
 - Manual-title and existing-catalog Watchlist panel flows with dynamic category selection
-- Public read-only community lists, private visibility enforcement, and bounded callback data
+- Public read-only community lists, editable display names, always-public enforcement, and bounded callback data
 - Legacy watchlist schema migration and idempotent rekeying
 - Owner title removal deleting all catalog files, preserving unrelated watchlists, and blocking old-source re-indexing
 - Failed Telegram source deletion remaining safely tombstoned, retry succeeding, and manual cleanup confirmation
@@ -108,7 +114,12 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Bulk status selection and one-commit insertion/update behavior
 - Failed bulk snapshot commit rolling back every selected title atomically
 - Non-owner rejection at the Admin Control Center handler even when a valid dashboard message is supplied
-- Legacy dashboard callback contracts continuing unchanged alongside the new panel routes
+- Legacy dashboard callback contracts continuing alongside the new panel routes, except the intentionally removed privacy button; its callback handler remains safe for old cards
+- Watchlist-library pagination, alphabetical ordering, A–Z/# picker contents and direct filtering
+- Tick selection surviving alphabet changes and bulk status insertion from the dedicated Watchlist add flow
+- Community display-name editing, length validation, HTML escaping and username retention
+- Schema-v4 conversion of previously private Watchlists to always-public state
+- Successful media delivery replacing the old workspace with one new dashboard below the file while preserving the pinned dashboard
 
 ## Honest remaining limits
 

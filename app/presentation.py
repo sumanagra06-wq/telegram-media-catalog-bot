@@ -21,7 +21,6 @@ def infer_button_style(text: str, callback_data: str | None = None) -> ButtonSty
         "main menu",
         "user menu",
         "home",
-        "make my list private",
         "suspend",
         "disable",
     )
