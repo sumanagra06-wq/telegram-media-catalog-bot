@@ -161,13 +161,15 @@ class UserProfile(BaseModel):
     status: UserStatus
     watchlist_public: bool = True
     watchlist: dict[str, WatchlistEntry] = Field(default_factory=dict)
+    panel_dashboard_message_id: int | None = None
+    panel_workspace_message_id: int | None = None
     created_at: str = Field(default_factory=utcnow_iso)
     updated_at: str = Field(default_factory=utcnow_iso)
     last_seen_at: str = Field(default_factory=utcnow_iso)
 
 
 class UsersState(VersionedState):
-    schema_version: int = 2
+    schema_version: int = 3
     kind: str = "users"
     access_mode: AccessMode = AccessMode.PUBLIC
     users: dict[str, UserProfile] = Field(default_factory=dict)

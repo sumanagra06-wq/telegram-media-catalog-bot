@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from ..config import Config
 from ..guards import access_denied_text, can_use_bot, ensure_registered
 from ..models import MediaType
+from ..panels import PanelManager
 from ..repositories import CatalogRepository, UserRepository
 from ..services import CatalogQueryService, SearchSessionStore, delivery_caption
 from ..ui import (
@@ -18,6 +19,7 @@ from ..ui import (
     pack_screen,
     search_results,
     season_screen,
+    selectable_results,
     variants_screen,
 )
 from ..utils import safe_html
@@ -45,6 +47,7 @@ async def plain_title_search(
     users: UserRepository,
     query: CatalogQueryService,
     sessions: SearchSessionStore,
+    panels: PanelManager | None = None,
 ) -> None:
     if message.chat.type != "private" or message.from_user is None:
         return
@@ -65,14 +68,42 @@ async def plain_title_search(
             "Send only the movie or series title, optionally followed by its year."
         )
         return
+    current_profile = users.get_user(message.from_user.id)
+    workspace_active = bool(
+        panels and current_profile and current_profile.panel_workspace_message_id is not None
+    )
     hits = query.search(raw_query)
     if not hits:
         text, markup = no_results(raw_query)
+        if panels and workspace_active:
+            rendered = await panels.render_existing_workspace(
+                user_id=message.from_user.id,
+                text=text,
+                reply_markup=markup,
+            )
+            if rendered:
+                return
         await message.answer(text, reply_markup=markup)
         return
     contents = [hit.content for hit in hits]
-    session = sessions.create(message.from_user.id, raw_query, [item.id for item in contents])
-    text, markup = search_results(session, contents, 0)
+    session = sessions.create(
+        message.from_user.id,
+        raw_query,
+        [item.id for item in contents],
+        selectable=workspace_active,
+    )
+    if session.selectable:
+        text, markup = selectable_results(session, contents, 0)
+    else:
+        text, markup = search_results(session, contents, 0)
+    if panels and workspace_active:
+        rendered = await panels.render_existing_workspace(
+            user_id=message.from_user.id,
+            text=text,
+            reply_markup=markup,
+        )
+        if rendered:
+            return
     await message.answer(text, reply_markup=markup)
 
 
@@ -97,7 +128,10 @@ async def search_page_callback(
         for content_id in session.content_ids
         if (content := catalog.get_content(content_id)) is not None
     ]
-    text, markup = search_results(session, contents, int(page_text))
+    if session.selectable:
+        text, markup = selectable_results(session, contents, int(page_text))
+    else:
+        text, markup = search_results(session, contents, int(page_text))
     await callback.answer()
     await edit_screen(callback, text, markup)
 

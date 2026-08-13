@@ -12,8 +12,9 @@ from aiohttp import web
 
 from .commands import register_commands
 from .config import Config, ConfigError
-from .handlers import admin, channel, common, search, watchlist
+from .handlers import admin, channel, common, panel, search, watchlist
 from .models import CatalogState, UsersState
+from .panels import PanelActivityMiddleware, PanelManager
 from .repositories import CatalogRepairResult, CatalogRepository, UserRepository
 from .services import CatalogQueryService, SearchSessionStore
 from .storage import StateStore, StorageError, TelegramSnapshotBackend
@@ -95,9 +96,14 @@ def create_application(config: Config) -> web.Application:
     users = UserRepository(users_store)
     query = CatalogQueryService(catalog)
     sessions = SearchSessionStore()
+    panels = PanelManager(bot, users)
+
+    dispatcher.callback_query.outer_middleware(PanelActivityMiddleware())
+    dispatcher.message.outer_middleware(PanelActivityMiddleware())
 
     # Stateful admin handlers must run before the plain-text search handler.
     dispatcher.include_router(admin.router)
+    dispatcher.include_router(panel.router)
     dispatcher.include_router(common.router)
     dispatcher.include_router(watchlist.router)
     dispatcher.include_router(search.router)
@@ -108,6 +114,7 @@ def create_application(config: Config) -> web.Application:
     dispatcher["users"] = users
     dispatcher["query"] = query
     dispatcher["sessions"] = sessions
+    dispatcher["panels"] = panels
 
     async def on_startup(bot: Bot) -> None:
         await _validate_database_channel(bot, config.file_database_channel_id, "file/catalog")
@@ -116,6 +123,9 @@ def create_application(config: Config) -> web.Application:
         await users_store.initialize()
         await catalog.migrate_schema()
         await users.migrate_schema()
+        cleaned_workspaces = await panels.cleanup_stale_workspaces()
+        if cleaned_workspaces:
+            LOGGER.info("Removed %s stale workspace references after restart", cleaned_workspaces)
         repair = await catalog.repair_episodic_grouping()
         if repair.changed:
             LOGGER.warning(
@@ -139,7 +149,11 @@ def create_application(config: Config) -> web.Application:
             users.snapshot().revision,
         )
 
+    async def on_shutdown() -> None:
+        await panels.shutdown()
+
     dispatcher.startup.register(on_startup)
+    dispatcher.shutdown.register(on_shutdown)
 
     app = web.Application()
 

@@ -26,7 +26,11 @@ A private-channel media catalog for movies and series. Telegram stores both the 
 - Owner-only, double-confirmed catalog-title removal that deletes every file record, attempts source-post deletion, and tracks required manual cleanup
 - Removed source tombstones prevent edited posts from silently re-indexing; failed Telegram deletions remain retryable
 - Public access initially; owner can switch to approval or allowlist
-- Native scoped command menus plus user/admin inline dashboards
+- Native scoped command menus plus the unchanged legacy inline interaction layer
+- One recoverable pinned dashboard per user and one in-place temporary workspace below it
+- Sliding five-minute workspace expiry with activity resets and restart cleanup
+- Checkbox-style multi-selection across Search, Browse, and Recently Added, with atomic bulk Watchlist insertion
+- One unified owner dashboard with an authorization-checked Admin Control Center entry
 - Protected delivery through `protect_content=True`
 - Versioned, checksummed gzip snapshots in two private Telegram database channels
 - Current and previous snapshot fallback through a pinned manifest
@@ -191,6 +195,12 @@ Dark
 
 The bot sends ranked title buttons. Selecting a series opens seasons and then available episodes. One episode variant is delivered immediately; multiple variants display language/quality buttons. Movies show a Get File button or version buttons.
 
+`/start` creates or recovers one dashboard message and asks Telegram to pin it in the private chat. Dashboard buttons create or reuse one temporary workspace message below it. Navigation edits that same workspace instead of adding another menu card. Every callback or user-message interaction resets a five-minute inactivity timer; after five quiet minutes the workspace is deleted. A restart removes or disables stale workspace cards while preserving the pinned dashboard reference.
+
+Search, Browse, and Recently Added results show a separate `☐`/`✅` toggle beside each title. Selections remain checked across result pages. Users can select up to 25 titles, choose **Add Selected**, then assign To Watch, On Hold, or Completed to the whole selection in one atomic database update. The adjacent title button still opens normal details and protected delivery.
+
+The owner's pinned card is the same user dashboard with one additional Admin Control Center entry. Owner authorization is still enforced by the handler, not merely by hiding the button. Existing commands and legacy callbacks remain operational during the new-panel test period.
+
 User native commands are intentionally short:
 
 ```text
@@ -255,12 +265,12 @@ source .venv/bin/activate
 pip install -r requirements-dev.txt
 ruff check app tests
 ruff format --check app tests
-pytest -q -W error
+python -m pytest -q -W error
 pip-audit -r requirements.txt
 bandit -q -r app
 ```
 
-The test suite covers the supplied real caption formats, split archives, metadata allowlisting, dynamic categories, duplicate update idempotency, search ordering, series grouping, exact watchlist statuses, snapshot rollback/fallback, and Telegram callback-size limits.
+The test suite covers the supplied real caption formats, split archives, metadata allowlisting, dynamic categories, duplicate update idempotency, search ordering, series grouping, exact watchlist statuses, snapshot rollback/fallback, Telegram callback-size limits, pinned-dashboard recovery, concurrent workspace reuse, sliding expiry, restart cleanup, checkbox state across pages, owner authorization, and atomic bulk Watchlist rollback.
 
 Run the webhook application:
 

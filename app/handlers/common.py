@@ -8,10 +8,17 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from ..commands import register_owner_commands
 from ..config import Config
 from ..guards import access_denied_text, can_use_bot, ensure_registered
+from ..panels import PanelManager
 from ..presentation import ActionButton
 from ..repositories import CatalogRepository, UserRepository
 from ..services import CatalogQueryService, SearchSessionStore
-from ..ui import browse_categories, main_dashboard, search_results
+from ..ui import (
+    browse_categories,
+    main_dashboard,
+    panel_dashboard,
+    panel_workspace_home,
+    search_results,
+)
 from ..utils import safe_html
 
 router = Router(name="common")
@@ -43,11 +50,37 @@ async def show_home_message(message: Message, config: Config) -> None:
     await message.answer(text, reply_markup=markup)
 
 
-async def show_home_callback(callback: CallbackQuery, config: Config) -> None:
-    text, markup = main_dashboard(
-        config.is_owner(callback.from_user.id), callback.from_user.first_name
-    )
+async def show_home_callback(
+    callback: CallbackQuery,
+    config: Config,
+    panels: PanelManager | None = None,
+) -> None:
+    message_id = callback.message.message_id if callback.message else None
+    if panels is not None and panels.is_workspace(callback.from_user.id, message_id):
+        text, markup = panel_workspace_home(config.is_owner(callback.from_user.id))
+    else:
+        text, markup = main_dashboard(
+            config.is_owner(callback.from_user.id), callback.from_user.first_name
+        )
     await edit_screen(callback, text, markup)
+
+
+async def show_pinned_dashboard(
+    message: Message,
+    config: Config,
+    panels: PanelManager,
+) -> None:
+    if message.from_user is None:
+        return
+    text, markup = panel_dashboard(
+        config.is_owner(message.from_user.id),
+        message.from_user.first_name,
+    )
+    await panels.ensure_dashboard(
+        user_id=message.from_user.id,
+        text=text,
+        reply_markup=markup,
+    )
 
 
 @router.message(CommandStart())
@@ -59,6 +92,7 @@ async def start_command(
     users: UserRepository,
     catalog: CatalogRepository,
     query: CatalogQueryService,
+    panels: PanelManager,
 ) -> None:
     if message.chat.type != "private" or message.from_user is None:
         return
@@ -68,6 +102,7 @@ async def start_command(
     if not can_use_bot(profile, config):
         await message.answer(access_denied_text(profile))
         return
+    await show_pinned_dashboard(message, config, panels)
     if command.args and command.args.startswith("c_"):
         content_id = command.args
         content = catalog.get_content(content_id)
@@ -83,7 +118,6 @@ async def start_command(
                 )
                 await message.answer(text, reply_markup=markup)
                 return
-    await show_home_message(message, config)
 
 
 @router.message(Command("menu"))
@@ -116,16 +150,33 @@ async def help_command(message: Message) -> None:
 
 
 @router.message(Command("cancel"))
-async def cancel_command(message: Message, state: FSMContext, config: Config) -> None:
+async def cancel_command(
+    message: Message,
+    state: FSMContext,
+    config: Config,
+    panels: PanelManager | None = None,
+) -> None:
     await state.clear()
     await message.answer("↩️ <b>Action cancelled</b>\nNo changes were made.")
+    if message.from_user and panels:
+        text, markup = panel_workspace_home(config.is_owner(message.from_user.id))
+        if await panels.render_existing_workspace(
+            user_id=message.from_user.id,
+            text=text,
+            reply_markup=markup,
+        ):
+            return
     await show_home_message(message, config)
 
 
 @router.callback_query(F.data == "menu:home")
-async def home_callback(callback: CallbackQuery, config: Config) -> None:
+async def home_callback(
+    callback: CallbackQuery,
+    config: Config,
+    panels: PanelManager,
+) -> None:
     await callback.answer()
-    await show_home_callback(callback, config)
+    await show_home_callback(callback, config, panels)
 
 
 @router.callback_query(F.data == "menu:search")

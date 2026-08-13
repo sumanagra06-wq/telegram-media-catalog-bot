@@ -49,6 +49,13 @@ class ContentRemovalResult:
     sources: tuple[RemovedSourceRecord, ...]
 
 
+@dataclass(frozen=True)
+class BulkWatchlistResult:
+    entries: tuple[WatchlistEntry, ...]
+    created: int
+    updated: int
+
+
 def _source_key(chat_id: int, message_id: int) -> str:
     return f"{chat_id}:{message_id}"
 
@@ -716,7 +723,7 @@ class UserRepository:
         return self.store.snapshot()
 
     async def migrate_schema(self) -> bool:
-        needs_migration = self.store.state.schema_version < 2 or any(
+        needs_migration = self.store.state.schema_version < 3 or any(
             not entry.id or key != entry.id
             for user in self.store.state.users.values()
             for key, entry in user.watchlist.items()
@@ -727,15 +734,19 @@ class UserRepository:
         def mutate(state: UsersState) -> bool:
             for user in state.users.values():
                 migrated: dict[str, WatchlistEntry] = {}
-                for entry in user.watchlist.values():
+                changed = False
+                for key, entry in user.watchlist.items():
                     entry_id = entry.id or make_id("w")
                     while entry_id in migrated:
                         entry_id = make_id("w")
+                    if key != entry_id or entry.id != entry_id:
+                        changed = True
                     entry.id = entry_id
                     migrated[entry_id] = entry
                 user.watchlist = migrated
-                user.updated_at = utcnow_iso()
-            state.schema_version = 2
+                if changed:
+                    user.updated_at = utcnow_iso()
+            state.schema_version = 3
             return True
 
         return await self.store.mutate(mutate)
@@ -840,6 +851,89 @@ class UserRepository:
 
         return await self.store.mutate(mutate)
 
+    async def set_panel_dashboard_message(self, user_id: int, message_id: int) -> UserProfile:
+        current = self.store.state.users.get(str(user_id))
+        if current is None:
+            raise ValueError("User not found")
+        if current.panel_dashboard_message_id == message_id:
+            return current.model_copy(deep=True)
+
+        def mutate(state: UsersState) -> UserProfile:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            user.panel_dashboard_message_id = message_id
+            user.updated_at = utcnow_iso()
+            return user.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def set_panel_workspace_message(self, user_id: int, message_id: int) -> UserProfile:
+        current = self.store.state.users.get(str(user_id))
+        if current is None:
+            raise ValueError("User not found")
+        if current.panel_workspace_message_id == message_id:
+            return current.model_copy(deep=True)
+
+        def mutate(state: UsersState) -> UserProfile:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            user.panel_workspace_message_id = message_id
+            user.updated_at = utcnow_iso()
+            return user.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def clear_panel_workspace_message(
+        self,
+        user_id: int,
+        *,
+        expected_message_id: int | None = None,
+    ) -> bool:
+        current = self.store.state.users.get(str(user_id))
+        if current is None or current.panel_workspace_message_id is None:
+            return False
+        if (
+            expected_message_id is not None
+            and current.panel_workspace_message_id != expected_message_id
+        ):
+            return False
+
+        def mutate(state: UsersState) -> bool:
+            user = state.users.get(str(user_id))
+            if user is None or user.panel_workspace_message_id is None:
+                return False
+            if (
+                expected_message_id is not None
+                and user.panel_workspace_message_id != expected_message_id
+            ):
+                return False
+            user.panel_workspace_message_id = None
+            user.updated_at = utcnow_iso()
+            return True
+
+        return await self.store.mutate(mutate)
+
+    async def clear_all_panel_workspace_messages(self) -> int:
+        if not any(
+            user.panel_workspace_message_id is not None for user in self.store.state.users.values()
+        ):
+            return 0
+
+        def mutate(state: UsersState) -> int:
+            cleared = 0
+            now = utcnow_iso()
+            for user in state.users.values():
+                if user.panel_workspace_message_id is None:
+                    continue
+                user.panel_workspace_message_id = None
+                user.updated_at = now
+                cleared += 1
+            return cleared
+
+        return await self.store.mutate(mutate)
+
     async def upsert_watchlist_entry(
         self,
         *,
@@ -892,6 +986,66 @@ class UserRepository:
             user.watchlist[entry_id] = entry
             user.updated_at = utcnow_iso()
             return entry.model_copy(deep=True), created
+
+        return await self.store.mutate(mutate)
+
+    async def bulk_upsert_catalog_watchlist(
+        self,
+        *,
+        user_id: int,
+        items: Iterable[tuple[ContentRecord, str]],
+        status: WatchStatus,
+    ) -> BulkWatchlistResult:
+        selected = tuple(items)
+        if not selected:
+            raise ValueError("Select at least one title")
+        if len(selected) > 25:
+            raise ValueError("Select no more than 25 titles at once")
+        content_ids = [content.id for content, _ in selected]
+        if len(set(content_ids)) != len(content_ids):
+            raise ValueError("Duplicate catalog titles are not allowed")
+
+        def mutate(state: UsersState) -> BulkWatchlistResult:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            results: list[WatchlistEntry] = []
+            created_count = 0
+            for content, category_name in selected:
+                existing = next(
+                    (
+                        entry
+                        for entry in user.watchlist.values()
+                        if entry.category_id == content.category_id
+                        and (
+                            entry.content_id == content.id
+                            or normalize_title(entry.title) == normalize_title(content.title)
+                        )
+                    ),
+                    None,
+                )
+                if existing is None:
+                    created_count += 1
+                entry_id = existing.id if existing else make_id("w")
+                entry = WatchlistEntry(
+                    id=entry_id,
+                    content_id=content.id,
+                    title=content.title,
+                    year=content.year,
+                    category_id=content.category_id,
+                    category_name=category_name,
+                    status=status,
+                    added_at=existing.added_at if existing else utcnow_iso(),
+                    updated_at=utcnow_iso(),
+                )
+                user.watchlist[entry_id] = entry
+                results.append(entry.model_copy(deep=True))
+            user.updated_at = utcnow_iso()
+            return BulkWatchlistResult(
+                entries=tuple(results),
+                created=created_count,
+                updated=len(results) - created_count,
+            )
 
         return await self.store.mutate(mutate)
 

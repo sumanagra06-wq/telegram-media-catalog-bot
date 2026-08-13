@@ -10,6 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from ..config import Config
 from ..guards import access_denied_text, can_use_bot, ensure_registered
 from ..models import UserProfile, UserStatus
+from ..panels import PanelManager
 from ..presentation import ActionButton as InlineKeyboardButton
 from ..repositories import CatalogRepository, UserRepository
 from ..services import CatalogQueryService
@@ -163,7 +164,11 @@ async def manual_category_selected(
 
 
 @router.message(WatchlistAddState.manual_title, F.text)
-async def manual_title_received(message: Message, state: FSMContext) -> None:
+async def manual_title_received(
+    message: Message,
+    state: FSMContext,
+    panels: PanelManager | None = None,
+) -> None:
     title = " ".join(message.text.split()).strip()
     if not title or len(title) > 160:
         await message.answer("Send a title between 1 and 160 characters, or /cancel.")
@@ -171,6 +176,14 @@ async def manual_title_received(message: Message, state: FSMContext) -> None:
     await state.update_data(title=title)
     await state.set_state(WatchlistAddState.manual_status)
     text, markup = watchlist_status_picker(title, "wams")
+    if message.from_user and panels:
+        rendered = await panels.render_existing_workspace(
+            user_id=message.from_user.id,
+            text=text,
+            reply_markup=markup,
+        )
+        if rendered:
+            return
     await message.answer(text, reply_markup=markup)
 
 
@@ -265,6 +278,7 @@ async def catalog_title_query(
     query: CatalogQueryService,
     catalog: CatalogRepository,
     state: FSMContext,
+    panels: PanelManager | None = None,
 ) -> None:
     data = await state.get_data()
     category_id = data.get("category_id")
@@ -289,13 +303,22 @@ async def catalog_title_query(
             )
         )
     builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data="menu:watchlist"))
-    await message.answer(
+    text = (
         "🎯 <b>CHOOSE A CATALOG TITLE</b>\n"
         f"<blockquote>{len(matches)} matching title{'s' if len(matches) != 1 else ''}</blockquote>\n"
         f"{DIVIDER}\n"
-        "Select the correct title below:",
-        reply_markup=builder.as_markup(),
+        "Select the correct title below:"
     )
+    markup = builder.as_markup()
+    if message.from_user and panels:
+        rendered = await panels.render_existing_workspace(
+            user_id=message.from_user.id,
+            text=text,
+            reply_markup=markup,
+        )
+        if rendered:
+            return
+    await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(WatchlistAddState.catalog_query, F.data.startswith("wacp:"))

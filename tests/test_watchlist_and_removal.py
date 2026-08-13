@@ -370,6 +370,9 @@ async def test_schema_migration_rekeys_legacy_watchlist_entries_once():
     migrated = users.get_user(42)
     assert migrated is not None
     assert migrated.watchlist_public is True
+    assert migrated.panel_dashboard_message_id is None
+    assert migrated.panel_workspace_message_id is None
+    assert users.snapshot().schema_version == 3
     assert len(migrated.watchlist) == 1
     entry_id, entry = next(iter(migrated.watchlist.items()))
     assert entry_id == entry.id

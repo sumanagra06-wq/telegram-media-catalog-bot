@@ -1,3 +1,3 @@
-from . import admin, channel, common, search, watchlist
+from . import admin, channel, common, panel, search, watchlist
 
-__all__ = ["admin", "channel", "common", "search", "watchlist"]
+__all__ = ["admin", "channel", "common", "panel", "search", "watchlist"]

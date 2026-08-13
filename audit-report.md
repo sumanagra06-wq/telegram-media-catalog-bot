@@ -10,6 +10,10 @@ This report records checks performed before packaging. It is not a claim that li
 - User-scoped watchlist mutation authorization and private-visibility enforcement
 - Owner-only catalog removal, tombstones, Telegram deletion retry, and manual-cleanup confirmation
 - Search ranking, pagination and callback-size constraints
+- One persisted pinned dashboard plus one persisted/reused temporary workspace per user
+- Sliding five-minute workspace expiry, callback/message activity resets, restart cleanup, and concurrent-open serialization
+- Search/Browse/Recently Added checkbox emulation, cross-page selection, and atomic bulk Watchlist insertion
+- Unified owner dashboard with an authorization-checked Admin Control Center entry
 - Semantic Bot API button styles (`primary`, `success`, `danger`) with neutral secondary actions
 - Unicode-emoji labels and consistent HTML card hierarchy across user and owner screens
 - Absence of custom-emoji dependencies and preservation of existing callback contracts
@@ -37,20 +41,25 @@ This report records checks performed before packaging. It is not a claim that li
 10. Replaced direct catalog-screen watchlist controls with a dedicated panel supporting dynamic categories, manual and indexed titles, explicit status selection, public-by-default read-only community lists, and a private visibility toggle. Added versioned migration for legacy entries.
 11. Added owner-only, double-confirmed catalog-title removal. The catalog commit blocks delivery first, source tombstones prevent re-indexing, recent Telegram posts are deleted in batches, failures remain retryable, and old posts can be manually confirmed after Telegram's deletion window expires.
 12. Reworked the native Telegram interface into concise card-style screens with clear hierarchy, standard Unicode emoji, official semantic button colors, richer search/media/Watchlist/admin states, neutral back/cancel controls, and prominent double-confirmed destructive actions. Existing callback expressions remain present and no custom-emoji IDs are used.
+13. Added the command-optional interaction layer without removing the legacy layer: `/start` creates, recovers, updates and pins one dashboard; dashboard actions create or reuse one serialized workspace; all workspace callbacks and relevant text-input continuations reuse that message; inactivity deletes it after five minutes; startup removes stale workspace cards while preserving dashboards.
+14. Added selectable Search, Browse and Recently Added results with separate checkbox/title buttons, selection retention across pages, a 25-title safety bound, one status picker using only `to_watch`, `on_hold` and `completed`, and one atomic user-snapshot commit for the full bulk operation.
+15. Added per-user async locking so simultaneous dashboard/workspace opens cannot create duplicate new-system cards, plus message-reference compare-and-clear guards so an old expiry task cannot clear a newer workspace.
+16. Set pytest-asyncio's fixture loop scope explicitly so the warnings-as-errors audit remains clean with current tooling.
 
 ## Automated results at package time
 
 - Ruff lint: passed
 - Ruff formatting check: passed
 - Python compileall: passed
-- Pytest with warnings treated as errors: passed (75 tests)
-- Test coverage: 61% overall; parser 98%, snapshot storage 84%, repositories 72%, services 79%, Watchlist handlers 53%, UI 66%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
+- Pytest with warnings treated as errors: passed (84 tests)
+- Test coverage: 62% overall; parser 98%, snapshot storage 84%, repositories 74%, services 86%, panel handlers 61%, panel lifecycle manager 64%, UI 69%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
 - Bandit: passed; the required Railway `0.0.0.0` bind is explicitly documented/suppressed
 - pip-audit: passed, no known vulnerabilities in production requirements
-- Mypy: core configuration, models, parser, storage, repositories, services, UI and presentation modules passed
-- Callback contract audit: all 128 baseline button callback expressions retained; five additive navigation/cancel actions
-- Representative rendering audit: 20 screens passed Telegram HTML, text/button length, callback-size, style-value, and no-custom-emoji checks
-- Placeholder scan: no TODO/FIXME/NotImplemented markers
+- Mypy: core configuration, models, parser, storage, repositories, services, panel lifecycle, UI and presentation modules passed; the new panel handler module also passed independently
+- Callback contract audit: zero baseline callback expressions are missing from UI, admin, Watchlist or guards; all legacy handlers and routes remain registered
+- Representative rendering audit: the previous 20-screen audit remains valid, and 9 additive panel screens passed Telegram HTML, text/button length, callback-size, style-value, and no-custom-emoji checks
+- Placeholder scan: no TODO/FIXME/XXX/HACK/NotImplemented markers
+- Secret and sensitive-file scans: clean
 
 The Aiogram handler layer is linted, compiled and exercised through domain/UI tests, but is not claimed as fully strict-mypy-clean because Aiogram's runtime filters narrow optional callback/message fields in ways its static types do not express.
 
@@ -89,11 +98,24 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Failed Telegram source deletion remaining safely tombstoned, retry succeeding, and manual cleanup confirmation
 - Failed catalog-removal snapshot commit rolling back without partial in-memory deletion
 - Security-sensitive environment-variable validation
+- Pinned-dashboard persistence, in-place reuse, deleted-message recovery and repinning
+- Concurrent workspace opens producing only one temporary message
+- Sliding inactivity expiry, manual activity reset and automatic deletion
+- Restart cleanup clearing only workspace references while preserving dashboards
+- Search queries editing the active workspace instead of creating a third result card
+- Selectable Search, Browse and Recently Added result rendering
+- Checkbox state across pages, callback-driven toggling and the 25-title bound
+- Bulk status selection and one-commit insertion/update behavior
+- Failed bulk snapshot commit rolling back every selected title atomically
+- Non-owner rejection at the Admin Control Center handler even when a valid dashboard message is supplied
+- Legacy dashboard callback contracts continuing unchanged alongside the new panel routes
 
 ## Honest remaining limits
 
 - A real end-to-end Telegram and Railway smoke test still requires the owner's bot token, owner ID, private channel IDs and Railway domain. Those secrets were not available during this audit.
 - Telegram-only persistence is appropriate for the stated 40–50-user scale, not high-write public scale.
+- The five-minute timers are intentionally in-process. Workspace message IDs are persisted, and every restart attempts to delete or disable those stale cards before clearing their references rather than trying to resume uncertain pre-restart deadlines.
+- Dashboard pinning is attempted through the Bot API and retried by `/start`; if Telegram denies pinning for a particular client/chat state, the dashboard still works as a normal bot message and the event is logged.
 - The standard Bot API cannot scan arbitrary old channel history; `/index` is required for missed old posts.
 - Telegram normally limits bot message deletion to messages sent within 48 hours. Older source posts require manual owner deletion; catalog tombstones still block delivery and re-indexing immediately.
 - Telegram protected content blocks normal official-client forwarding/saving but is not absolute DRM against modified clients or external capture.

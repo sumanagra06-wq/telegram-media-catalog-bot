@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from rapidfuzz import fuzz
 
@@ -24,6 +24,9 @@ class SearchSession:
     query: str
     content_ids: list[str]
     created_at: float
+    selectable: bool = False
+    result_heading: str = "SEARCH RESULTS"
+    selected_content_ids: set[str] = field(default_factory=set)
 
 
 class SearchSessionStore:
@@ -31,10 +34,26 @@ class SearchSessionStore:
         self.ttl_seconds = ttl_seconds
         self._sessions: dict[str, SearchSession] = {}
 
-    def create(self, user_id: int, query: str, content_ids: list[str]) -> SearchSession:
+    def create(
+        self,
+        user_id: int,
+        query: str,
+        content_ids: list[str],
+        *,
+        selectable: bool = False,
+        result_heading: str = "SEARCH RESULTS",
+    ) -> SearchSession:
         self.prune()
         token = make_id("q", 4).split("_", 1)[1]
-        session = SearchSession(token, user_id, query, content_ids, time.monotonic())
+        session = SearchSession(
+            token,
+            user_id,
+            query,
+            content_ids,
+            time.monotonic(),
+            selectable=selectable,
+            result_heading=result_heading,
+        )
         self._sessions[token] = session
         return session
 

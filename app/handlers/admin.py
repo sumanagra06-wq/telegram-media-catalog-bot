@@ -12,6 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
+    InlineKeyboardMarkup,
     Message,
     MessageOriginChannel,
 )
@@ -20,6 +21,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from ..config import Config
 from ..filters import NotOwnerFilter, OwnerFilter
 from ..models import AccessMode, CategoryMode, RemovedSourceRecord, UserStatus
+from ..panels import PanelManager
 from ..presentation import ActionButton as InlineKeyboardButton
 from ..repositories import CatalogRepository, UserRepository
 from ..ui import (
@@ -62,6 +64,23 @@ class AdminState(StatesGroup):
     user_find = State()
 
 
+async def _workspace_or_answer(
+    message: Message,
+    text: str,
+    panels: PanelManager | None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    if message.from_user and panels:
+        rendered = await panels.render_existing_workspace(
+            user_id=message.from_user.id,
+            text=text,
+            reply_markup=reply_markup,
+        )
+        if rendered:
+            return
+    await message.answer(text, reply_markup=reply_markup)
+
+
 async def _validate_private_channel(bot: Bot, channel_id: int, config: Config) -> str:
     if channel_id in {config.file_database_channel_id, config.user_database_channel_id}:
         raise ValueError("A database channel cannot also be a category storage channel")
@@ -92,16 +111,19 @@ async def _show_add_confirmation(
     config: Config,
     name: str,
     raw_channel_id: str,
+    panels: PanelManager | None = None,
 ) -> None:
     try:
         channel_id = int(raw_channel_id.strip())
         title = await _validate_private_channel(bot, channel_id, config)
     except (ValueError, TypeError) as exc:
-        await message.answer(
+        await _workspace_or_answer(
+            message,
             "❌ <b>CHANNEL VALIDATION FAILED</b>\n"
             f"<blockquote>{safe_html(exc)}</blockquote>\n"
             f"{DIVIDER}\n"
-            "Send a valid private channel ID, or use /cancel to stop."
+            "Send a valid private channel ID, or use /cancel to stop.",
+            panels,
         )
         return
     mode = _default_category_mode(name)
@@ -117,7 +139,8 @@ async def _show_add_confirmation(
         InlineKeyboardButton(text="✅ Create category", callback_data="aca:confirm"),
         InlineKeyboardButton(text="Cancel", callback_data="aca:cancel"),
     )
-    await message.answer(
+    await _workspace_or_answer(
+        message,
         "✅ <b>CONFIRM NEW CATEGORY</b>\n"
         "<blockquote>Review the source before creating it.</blockquote>\n"
         f"{DIVIDER}\n"
@@ -125,7 +148,8 @@ async def _show_add_confirmation(
         f"📡 <b>Channel</b>  •  {safe_html(title)}\n"
         f"🔢 <b>Channel ID</b>  •  <code>{channel_id}</code>\n"
         f"⚙️ <b>Mode</b>  •  {safe_html(mode.value.title())}",
-        reply_markup=builder.as_markup(),
+        panels,
+        builder.as_markup(),
     )
 
 
@@ -238,38 +262,58 @@ async def category_add_start(callback: CallbackQuery, state: FSMContext) -> None
     await state.clear()
     await state.set_state(AdminState.category_name)
     await callback.answer()
-    await callback.message.answer(
+    await edit_screen(
+        callback,
         "➕ <b>ADD A CATEGORY</b>\n"
         "<blockquote>Step 1 of 2 • choose a display name</blockquote>\n"
         f"{DIVIDER}\n"
         "Send a short category name, such as <code>Movies</code> or <code>Anime</code>.\n\n"
-        "Use /cancel to stop."
+        "Use /cancel to stop.",
+        None,
     )
 
 
 @router.message(AdminState.category_name, owner, F.text)
-async def category_name_input(message: Message, state: FSMContext) -> None:
+async def category_name_input(
+    message: Message,
+    state: FSMContext,
+    panels: PanelManager | None = None,
+) -> None:
     name = " ".join(message.text.split()).strip()
     if not name or len(name) > 60:
         await message.answer("Use a category name between 1 and 60 characters.")
         return
     await state.update_data(category_name=name)
     await state.set_state(AdminState.category_channel)
-    await message.answer(
+    await _workspace_or_answer(
+        message,
         "📡 <b>CONNECT STORAGE CHANNEL</b>\n"
         "<blockquote>Step 2 of 2 • private source channel</blockquote>\n"
         f"{DIVIDER}\n"
         "Send the private channel’s numeric ID.\n\n"
-        "✅ The bot must already be an administrator with permission to delete messages."
+        "✅ The bot must already be an administrator with permission to delete messages.",
+        panels,
     )
 
 
 @router.message(AdminState.category_channel, owner, F.text)
 async def category_channel_input(
-    message: Message, state: FSMContext, bot: Bot, config: Config
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    config: Config,
+    panels: PanelManager | None = None,
 ) -> None:
     data = await state.get_data()
-    await _show_add_confirmation(message, state, bot, config, data["category_name"], message.text)
+    await _show_add_confirmation(
+        message,
+        state,
+        bot,
+        config,
+        data["category_name"],
+        message.text,
+        panels,
+    )
 
 
 @router.callback_query(F.data == "aca:confirm", owner, StateFilter(AdminState.category_confirm))
@@ -310,11 +354,13 @@ async def category_rename_start(callback: CallbackQuery, state: FSMContext) -> N
     await state.set_state(AdminState.category_rename)
     await state.update_data(category_id=category_id)
     await callback.answer()
-    await callback.message.answer(
+    await edit_screen(
+        callback,
         "✏️ <b>RENAME CATEGORY</b>\n"
         "<blockquote>Update the display name without changing its files.</blockquote>\n"
         f"{DIVIDER}\n"
-        "Send the new category name, or use /cancel to stop."
+        "Send the new category name, or use /cancel to stop.",
+        None,
     )
 
 
@@ -323,6 +369,7 @@ async def category_rename_input(
     message: Message,
     state: FSMContext,
     catalog: CatalogRepository,
+    panels: PanelManager | None = None,
 ) -> None:
     data = await state.get_data()
     try:
@@ -334,7 +381,7 @@ async def category_rename_input(
         return
     await state.clear()
     text, markup = admin_category_detail(category)
-    await message.answer(text, reply_markup=markup)
+    await _workspace_or_answer(message, text, panels, markup)
 
 
 @router.callback_query(F.data.startswith("acc:"), owner)
@@ -343,12 +390,14 @@ async def category_channel_start(callback: CallbackQuery, state: FSMContext) -> 
     await state.set_state(AdminState.category_change_channel)
     await state.update_data(category_id=category_id)
     await callback.answer()
-    await callback.message.answer(
+    await edit_screen(
+        callback,
         "🔄 <b>CHANGE STORAGE CHANNEL</b>\n"
         "<blockquote>Connect a new private source channel.</blockquote>\n"
         f"{DIVIDER}\n"
         "Send the new private channel ID.\n\n"
-        "🗄 The previous channel remains registered as a legacy source for existing files."
+        "🗄 The previous channel remains registered as a legacy source for existing files.",
+        None,
     )
 
 
@@ -359,6 +408,7 @@ async def category_channel_change_input(
     catalog: CatalogRepository,
     bot: Bot,
     config: Config,
+    panels: PanelManager | None = None,
 ) -> None:
     try:
         channel_id = int(message.text.strip())
@@ -372,7 +422,7 @@ async def category_channel_change_input(
         return
     await state.clear()
     text, markup = admin_category_detail(category)
-    await message.answer(text, reply_markup=markup)
+    await _workspace_or_answer(message, text, panels, markup)
 
 
 @router.callback_query(F.data.startswith("acm:"), owner)
@@ -1073,12 +1123,14 @@ async def user_detail_callback(callback: CallbackQuery, users: UserRepository) -
 async def user_find_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminState.user_find)
     await callback.answer()
-    await callback.message.answer(
+    await edit_screen(
+        callback,
         "🔎 <b>FIND A USER</b>\n"
         "<blockquote>Search by an exact Telegram identity.</blockquote>\n"
         f"{DIVIDER}\n"
         "Send a numeric user ID or exact <code>@username</code>.\n\n"
-        "Use /cancel to stop."
+        "Use /cancel to stop.",
+        None,
     )
 
 
@@ -1087,6 +1139,7 @@ async def user_find_input(
     message: Message,
     state: FSMContext,
     users: UserRepository,
+    panels: PanelManager | None = None,
 ) -> None:
     query = message.text.strip().lstrip("@").casefold()
     user = (
@@ -1105,7 +1158,7 @@ async def user_find_input(
         return
     await state.clear()
     text, markup = user_detail(user)
-    await message.answer(text, reply_markup=markup)
+    await _workspace_or_answer(message, text, panels, markup)
 
 
 @router.callback_query(F.data.startswith("aus:"), owner)
