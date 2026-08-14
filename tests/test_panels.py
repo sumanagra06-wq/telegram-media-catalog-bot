@@ -47,6 +47,7 @@ class FakePanelBot:
         self.deleted_topics = []
         self.failed_delete_topic_ids = set()
         self.missing_delete_topic_ids = set()
+        self.disabled_delete_topic_ids = set()
         self.transient_delete_topic_ids = set()
         self.delete_topic_attempts = []
         self.source_copy_missing = False
@@ -58,6 +59,11 @@ class FakePanelBot:
             raise TelegramNetworkError(
                 method=EditMessageText(chat_id=chat_id, message_id=1, text="delete"),
                 message="temporary network failure",
+            )
+        if message_thread_id in self.disabled_delete_topic_ids:
+            raise TelegramBadRequest(
+                method=EditMessageText(chat_id=chat_id, message_id=1, text="delete"),
+                message="Bad Request: chat is not a forum",
             )
         if message_thread_id in self.missing_delete_topic_ids:
             raise TelegramBadRequest(
@@ -354,6 +360,19 @@ async def test_topic_cleanup_treats_missing_as_retired_but_retains_real_failures
     assert (retired, failed) == (1, 1)
     assert "cat_movies" not in profile.delivery_topics
     assert profile.delivery_topics["cat_series"].message_thread_id == 900
+
+
+async def test_topic_cleanup_retains_reference_when_threaded_mode_is_disabled():
+    _, users = await _repositories()
+    await _register(users)
+    await _set_delivery_topic_history(users, legacy=899)
+    bot = FakePanelBot()
+    bot.disabled_delete_topic_ids.add(899)
+
+    retired, failed = await PanelManager(bot, users).cleanup_delivery_topics()
+
+    assert (retired, failed) == (0, 1)
+    assert users.get_user(42).delivery_topic_id == 899
 
 
 async def test_topic_cleanup_retries_transient_telegram_failure(monkeypatch):

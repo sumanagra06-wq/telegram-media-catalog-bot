@@ -78,7 +78,7 @@ This report records checks performed before packaging. It is not a claim that li
 - Ruff lint: passed
 - Ruff formatting check: passed
 - Python compileall: passed
-- Pytest with warnings treated as errors: passed (105 tests)
+- Pytest with warnings treated as errors: passed (106 tests)
 - Test coverage: 64% overall; metadata parser 98%, snapshot storage 84%, repositories 75%, services 87%, panel handlers 54%, Watchlist handlers 60%, delivery/search handlers 58%, panel lifecycle manager 72%, UI 76%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
 - Bandit: passed; the required Railway `0.0.0.0` bind is explicitly documented/suppressed
 - pip-audit: passed, no known vulnerabilities in production requirements
@@ -145,7 +145,7 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Tick selection surviving filter changes and bulk status insertion from the dedicated Watchlist add flow
 - Community display-name editing, length validation, HTML escaping and username retention
 - Schema-v7 migration preserving schema-v4/v5/v6 Watchlists and legacy topic references while dropping receipt state
-- Legacy single/category-topic deletion, duplicate-ID deduplication, already-unavailable handling, transient-failure retention, and persistence-failure retry safety
+- Legacy single/category-topic deletion, duplicate-ID deduplication, already-unavailable handling, disabled-thread-mode retention, transient-failure retry/retention, and persistence-failure retry safety
 - Direct flat-chat copy without `message_thread_id` and Telegram document file-ID fallback when source copying is unavailable
 - Metadata-only permanent delivered files with no action keyboard
 - Repeated deliveries preserving every delivered file while removing temporary workspaces and retaining exactly one newly pinned dashboard

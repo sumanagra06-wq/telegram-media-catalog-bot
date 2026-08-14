@@ -78,7 +78,6 @@ class PanelManager:
             "topic_id_invalid",
             "thread was deleted",
             "topic was deleted",
-            "chat is not a forum",
         )
         for attempt in range(3):
             try:
