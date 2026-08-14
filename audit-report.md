@@ -71,7 +71,7 @@ This report records checks performed before packaging. It is not a claim that li
 30. Superseded findings 26–29's topic/receipt lifecycle with users schema v7 and flat-chat delivery. Every successful protected copy now targets the ordinary private chat without `message_thread_id`; the file is permanent, the temporary callback source/workspace is removed, and no receipt is created or persisted.
 31. Replaced post-delivery workspace/receipt reuse with a fresh-dashboard transaction: send and pin a new dashboard beneath the delivered file, persist its ID, then unpin/delete the previous dashboard. If persistence fails, the new dashboard is rolled back while the delivered file and old tracked dashboard remain intact.
 32. Added startup retirement of every persisted legacy single/category topic. Confirmed deletions and Telegram's already-unavailable responses clear only the matching references; transient/permission failures keep references for the next startup retry. This migration intentionally deletes copies inside those topics while leaving private catalog source posts untouched.
-33. Removed the legacy receipt field during v7 migration, treat all persisted workspaces as temporary during restart cleanup, expose `delivery_mode: flat_chat`, and log that the owner must disable BotFather Threaded Mode to restore Telegram's normal private-chat UI.
+33. Removed the legacy receipt field during v7 migration, treat all persisted workspaces as temporary during restart cleanup, expose `delivery_mode: flat_chat` plus the pending legacy-topic count, and log that the owner must disable BotFather Threaded Mode to restore Telegram's normal private-chat UI.
 
 ## Automated results at package time
 

@@ -368,10 +368,12 @@ async def test_topic_cleanup_retains_reference_when_threaded_mode_is_disabled():
     await _set_delivery_topic_history(users, legacy=899)
     bot = FakePanelBot()
     bot.disabled_delete_topic_ids.add(899)
+    panels = PanelManager(bot, users)
 
-    retired, failed = await PanelManager(bot, users).cleanup_delivery_topics()
+    retired, failed = await panels.cleanup_delivery_topics()
 
     assert (retired, failed) == (0, 1)
+    assert panels.pending_delivery_topic_count() == 1
     assert users.get_user(42).delivery_topic_id == 899
 
 

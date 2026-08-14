@@ -60,6 +60,15 @@ class PanelManager:
         """Serialize each user's protected copy and dashboard replacement sequence."""
         return self._delivery_locks.setdefault(user_id, asyncio.Lock())
 
+    def pending_delivery_topic_count(self) -> int:
+        return sum(
+            len(
+                {topic.message_thread_id for topic in profile.delivery_topics.values()}
+                | ({profile.delivery_topic_id} if profile.delivery_topic_id is not None else set())
+            )
+            for profile in self.users.list_users()
+        )
+
     def is_dashboard(self, user_id: int, message_id: int | None) -> bool:
         profile = self.users.get_user(user_id)
         return bool(profile and profile.panel_dashboard_message_id == message_id)

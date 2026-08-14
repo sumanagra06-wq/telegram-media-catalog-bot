@@ -191,6 +191,7 @@ def create_application(config: Config) -> web.Application:
                 "users_revision": users.snapshot().revision,
                 "threaded_mode_enabled": runtime_status["threaded_mode_enabled"],
                 "delivery_mode": "flat_chat",
+                "pending_legacy_topics": panels.pending_delivery_topic_count(),
             }
             return web.json_response(data)
         except StorageError:

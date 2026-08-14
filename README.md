@@ -119,7 +119,7 @@ PROTECT_DELIVERED_CONTENT=true
 3. Add the bot to both database channels with the required permissions.
 4. Configure all Railway variables.
 5. Deploy with one replica.
-6. Wait for `/health` to report `status: ok`, `delivery_mode: flat_chat`, and `threaded_mode_enabled: false`. A `true` threaded-mode value does not block delivery, but the owner must disable it in BotFather to restore the intended normal-chat UI.
+6. Wait for `/health` to report `status: ok`, `delivery_mode: flat_chat`, `threaded_mode_enabled: false`, and `pending_legacy_topics: 0`. A `true` threaded-mode value does not block delivery, but the owner must disable it in BotFather to restore the intended normal-chat UI.
 7. Open the bot privately and send `/start`.
 8. Add the bot as administrator to the Movies storage channel.
 9. Open Dashboard → Admin Control Center → Categories → Add category, then submit `Movies` and its private channel ID.
@@ -136,7 +136,7 @@ Only begin bulk uploads after the category registration is committed.
 3. Remember that deleting a Telegram topic also deletes every delivered copy inside it. The catalog source posts are unchanged and remain requestable.
 4. Inspect the topic bar once. The schema-v6 release discarded the ID of its renamed `🗃 Previous Deliveries` topic after archiving it, and the Bot API cannot enumerate that unreferenced topic; if it is still visible, delete it manually.
 5. After automatic retirement and that one-time check complete, disable **Threaded Mode** in BotFather.
-6. Confirm `/health` shows `delivery_mode: flat_chat` and `threaded_mode_enabled: false`, then request one real file to smoke-test the permanent-file → fresh-pinned-dashboard sequence.
+6. Confirm `/health` shows `delivery_mode: flat_chat`, `threaded_mode_enabled: false`, and `pending_legacy_topics: 0`, then request one real file to smoke-test the permanent-file → fresh-pinned-dashboard sequence.
 
 ## Adding future categories
 
