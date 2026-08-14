@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from app.config import Config
 from app.handlers.channel import index_source_message
 from app.handlers.search import content_callback, episode_callback, plain_title_search
-from app.main import _purge_movie_nobita_doraemon, _write_repair_cards
+from app.main import _write_repair_cards
 from app.metadata import parse_metadata
 from app.models import CatalogState, CategoryMode, MediaType, UsersState
 from app.panels import PanelManager
@@ -18,7 +18,6 @@ class FakeBot:
         self.sent_messages = []
         self.copied_messages = []
         self.deleted_messages = []
-        self.deleted_batches = []
 
     async def send_message(self, chat_id, text, **kwargs):
         self.sent_messages.append((chat_id, text, kwargs))
@@ -34,10 +33,6 @@ class FakeBot:
 
     async def delete_message(self, chat_id, message_id):
         self.deleted_messages.append((chat_id, message_id))
-        return True
-
-    async def delete_messages(self, chat_id, message_ids):
-        self.deleted_batches.append((chat_id, list(message_ids)))
         return True
 
 
@@ -156,50 +151,6 @@ async def test_plain_search_to_episode_delivery_flow():
     ] == [(100, 101)]
     assert catalog.get_file(record.id).available is True
     await panels.shutdown()
-
-
-async def test_one_release_nobita_cleanup_is_strictly_limited_to_movie_category():
-    catalog, _ = await _repositories()
-    movie = await catalog.add_category("Movie", -10010, "Movie")
-    cartoon = await catalog.add_category("Cartoon Movie", -10020, "Cartoon Movie")
-    fixtures = [
-        (movie.id, -10010, 1, "Doraemon Nobita Space Heroes 2015 1080p Hindi mkv"),
-        (movie.id, -10010, 2, "Doremon Steel Troops 2011 720p Hindi mkv"),
-        (movie.id, -10010, 3, "Interstellar 2014 1080p English mkv"),
-        (cartoon.id, -10020, 4, "Doraemon Nobita Treasure Island 2018 1080p Hindi mkv"),
-    ]
-    for category_id, chat_id, message_id, caption in fixtures:
-        await catalog.upsert_file(
-            category_id=category_id,
-            source_chat_id=chat_id,
-            source_message_id=message_id,
-            telegram_file_id=f"file-{message_id}",
-            telegram_file_unique_id=f"unique-{message_id}",
-            media_type=MediaType.VIDEO,
-            metadata=parse_metadata(caption),
-        )
-    bot = FakeBot()
-
-    result = await _purge_movie_nobita_doraemon(bot, _config(), catalog)
-
-    assert result == {
-        "status": "complete",
-        "categories": 1,
-        "titles_removed": 2,
-        "files_removed": 2,
-        "source_posts_deleted": 2,
-        "source_posts_pending": 0,
-    }
-    remaining = {(item.category_id, item.title) for item in catalog.snapshot().contents.values()}
-    assert (movie.id, "Interstellar") in remaining
-    assert (cartoon.id, "Doraemon Nobita Treasure Island") in remaining
-    assert not any(
-        item.category_id == movie.id
-        and {"nobita", "doraemon", "doremon"}.intersection(item.title.casefold().split())
-        for item in catalog.snapshot().contents.values()
-    )
-    assert bot.deleted_batches == [(-10010, [1, 2])]
-    assert catalog.pending_removed_sources() == []
 
 
 async def test_channel_post_indexing_uses_allowlisted_metadata_only():
