@@ -68,6 +68,9 @@ class TelegramSnapshotBackend:
         self.manifest: SnapshotManifest | None = None
         self.manifest_message_id: int | None = None
 
+    def current_compressed_size(self) -> int | None:
+        return self.manifest.current.compressed_size if self.manifest is not None else None
+
     @staticmethod
     def _manifest_text(manifest: SnapshotManifest) -> str:
         body = manifest.model_dump_json(exclude_none=True)

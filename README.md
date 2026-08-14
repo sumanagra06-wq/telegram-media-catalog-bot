@@ -6,6 +6,7 @@ A private-channel media catalog for movies and series. Telegram stores both the 
 
 - Dynamic private storage categories; no category channel IDs are hardcoded
 - Automatic indexing of new and edited video/document channel posts
+- Burst-safe catalog ingestion that coalesces up to 100 concurrent channel files into one atomic Telegram snapshot commit and one rate-limited human audit summary
 - Owner-assisted `/index` import for an older forwarded channel post
 - Messy filename-style metadata parsing with tested support for:
   - `S02E01`, `S02-E19`, and `S03 E01`
@@ -21,7 +22,7 @@ A private-channel media catalog for movies and series. Telegram stores both the 
 - Only title, year, language, quality, season, episode/range, and pack part are indexed from captions
 - Exact, prefix, word, substring, and typo-tolerant title ranking
 - Four search results per page
-- Series navigation: title → season → episode → variant → protected file
+- Series navigation: title → season → episode → variant → protected file; season numbers up to 999 and episode numbers up to 9,999 are parsed, with 20 episodes per UI page
 - Season packs: split archives remain Part 1/2/3; combined files are labeled by exact episode range (for example, Episodes 1–15)
 - Movie navigation: title → language/quality variant → protected file
 - Dedicated Watchlist panel with manual-title and existing-catalog add flows
@@ -78,9 +79,10 @@ The catalog stores Telegram source channel/message references and Telegram file 
 4. Keep database and storage channels private.
 5. Keep storage-channel “Restrict Saving Content” disabled so old posts can be forwarded to the owner for `/index`. Delivered files are protected separately by the bot.
 6. Add and start the bot before bulk uploading. Telegram only retains undelivered updates for a limited period.
-7. Do not place real bot/GitHub/Railway tokens in source control or send them in chat.
-8. Owner catalog-title removal is irreversible. Verify the title and file count on both confirmation screens before deleting.
-9. Keep **Threaded Mode disabled** for normal operation. When upgrading from the schema-v6 topic release, leave it enabled only until the new deployment retires the legacy topics, then disable it in BotFather. Application code cannot change this setting.
+7. Rapid bursts of up to 100 valid files are coalesced transactionally. Let Telegram finish forwarding each burst; the next two-minute burst may begin normally. `/health` exposes `pending_catalog_ingest`, `catalog_files`, and current/maximum compressed catalog snapshot bytes for monitoring.
+8. Do not place real bot/GitHub/Railway tokens in source control or send them in chat.
+9. Owner catalog-title removal is irreversible. Verify the title and file count on both confirmation screens before deleting.
+10. Keep **Threaded Mode disabled** for normal operation. When upgrading from the schema-v6 topic release, leave it enabled only until the new deployment retires the legacy topics, then disable it in BotFather. Application code cannot change this setting.
 
 ## Required channel permissions
 
@@ -289,6 +291,8 @@ Every state change is write-through:
 
 A crash before step 5 leaves the previous manifest authoritative. Startup verifies SHA-256 and falls back to the previous snapshot if the current document is corrupt.
 
+Rapid channel-post updates wait briefly in memory so concurrent files can enter one catalog mutation and one snapshot. The webhook remains synchronous: each channel update is acknowledged only after its whole batch commits, and a failed commit rejects every member so Telegram can retry without a partial in-memory catalog. Individual audit events remain in the snapshot, while one compact human-readable card represents the burst in the File Database channel.
+
 The public Bot API limits downloaded files, so the application refuses to let a compressed database snapshot approach that limit. For the intended 40–50 users this should remain far below the threshold.
 
 ## Development and verification
@@ -306,7 +310,7 @@ pip-audit -r requirements.txt
 bandit -q -r app
 ```
 
-The test suite covers the supplied real caption formats, `MOVIES.IN`, numbered movie captions, mixed-caption attachment authority, ordinary episodes, combined episode ranges, split archives, catalog schema-v3 migration, metadata allowlisting, dynamic categories, duplicate update idempotency, search ordering, range-aware Season Pack UI, series grouping, exact Watchlist statuses, snapshot rollback/fallback, Telegram callback-size limits, pinned-dashboard recovery, concurrent workspace reuse, destructive legacy-topic cleanup with failure-safe reference retention, direct flat-chat copy and Telegram file-ID fallback, button-free delivery captions, dashboard replacement and rollback, broadcast owner authorization/recipient inclusion/retry/partial failure/atomic dashboard persistence, permanent delivered-file retention across repeated deliveries, typed-query cleanup, topic-message exclusion during migration, dedicated Watchlist checkbox state across pages and alphabet filters, stale discovery callback retirement, editable community names, always-public enforcement, and atomic bulk Watchlist rollback.
+The test suite covers the supplied real caption formats, `MOVIES.IN`, numbered movie captions, mixed-caption attachment authority, ordinary episodes, combined episode ranges, split archives, catalog schema-v3 migration, one-commit 100-file burst ingestion, rollback/retry after a failed burst snapshot, 18-season navigation and 55-episode pagination, metadata allowlisting, dynamic categories, duplicate update idempotency, search ordering, range-aware Season Pack UI, series grouping, exact Watchlist statuses, snapshot rollback/fallback, Telegram callback-size limits, pinned-dashboard recovery, concurrent workspace reuse, destructive legacy-topic cleanup with failure-safe reference retention, direct flat-chat copy and Telegram file-ID fallback, button-free delivery captions, dashboard replacement and rollback, broadcast owner authorization/recipient inclusion/retry/partial failure/atomic dashboard persistence, permanent delivered-file retention across repeated deliveries, typed-query cleanup, topic-message exclusion during migration, dedicated Watchlist checkbox state across pages and alphabet filters, stale discovery callback retirement, editable community names, always-public enforcement, and atomic bulk Watchlist rollback.
 
 Run the webhook application:
 

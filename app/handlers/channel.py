@@ -6,9 +6,10 @@ from aiogram import Bot, Router
 from aiogram.types import Message
 
 from ..config import Config
+from ..ingestion import CatalogIngestBatcher, IndexAuditBatcher, IndexAuditEntry
 from ..metadata import MetadataParseError, ParsedMetadata, parse_metadata
 from ..models import CategoryMode, MediaType
-from ..repositories import CatalogRepository
+from ..repositories import CatalogRepository, FileUpsertRequest
 from ..utils import safe_html
 
 LOGGER = logging.getLogger(__name__)
@@ -34,7 +35,11 @@ def _media(message: Message) -> tuple[MediaType, str, str, str | None] | None:
 
 
 def _validate_mode(mode: CategoryMode, metadata: ParsedMetadata) -> None:
-    is_series = metadata.season is not None or metadata.episode is not None
+    is_series = (
+        metadata.season is not None
+        or metadata.episode is not None
+        or metadata.episode_start is not None
+    )
     if mode == CategoryMode.SINGLE and is_series:
         raise MetadataParseError("Episode metadata was posted in a single-title category")
     if mode == CategoryMode.EPISODIC and metadata.season is None:
@@ -84,6 +89,8 @@ async def index_source_message(
     source_message_id: int | None = None,
     source_title: str | None = None,
     allow_legacy: bool = False,
+    ingest_batcher: CatalogIngestBatcher | None = None,
+    index_audit_batcher: IndexAuditBatcher | None = None,
 ) -> bool:
     source_chat_id = source_chat_id if source_chat_id is not None else message.chat.id
     source_message_id = source_message_id if source_message_id is not None else message.message_id
@@ -117,7 +124,7 @@ async def index_source_message(
         )
         return False
 
-    record, content, created = await catalog.upsert_file(
+    request = FileUpsertRequest(
         category_id=category.id,
         source_chat_id=source_chat_id,
         source_message_id=source_message_id,
@@ -126,6 +133,10 @@ async def index_source_message(
         media_type=media_type,
         metadata=metadata,
     )
+    if ingest_batcher is None:
+        record, content, created = (await catalog.upsert_files([request]))[0]
+    else:
+        record, content, created = await ingest_batcher.submit(request)
     languages = ", ".join(record.languages) if record.languages else "Unknown"
     year = str(record.year) if record.year else "Unknown"
     details = [
@@ -148,15 +159,31 @@ async def index_source_message(
     if record.pack_part is not None:
         details.append(f"Season pack part: {record.pack_part}")
     details.append(f"Source message: <code>{source_message_id}</code>")
-    try:
-        await bot.send_message(
-            config.file_database_channel_id,
-            "\n".join(details),
-            disable_notification=True,
+    detail_text = "\n".join(details)
+    if index_audit_batcher is not None:
+        await index_audit_batcher.submit(
+            IndexAuditEntry(
+                detail_text=detail_text,
+                created=created,
+                category_name=category.name,
+                title=record.title,
+                source_message_id=source_message_id,
+                season=record.season,
+                episode=record.episode,
+                episode_start=record.episode_start,
+                episode_end=record.episode_end,
+            )
         )
-    except Exception:
-        # Index commit is authoritative; a human-readable audit card is optional.
-        LOGGER.warning("Index succeeded but its audit card could not be sent", exc_info=True)
+    else:
+        try:
+            await bot.send_message(
+                config.file_database_channel_id,
+                detail_text,
+                disable_notification=True,
+            )
+        except Exception:
+            # Index commit is authoritative; a human-readable audit card is optional.
+            LOGGER.warning("Index succeeded but its audit card could not be sent", exc_info=True)
     return True
 
 
@@ -166,8 +193,17 @@ async def channel_post(
     bot: Bot,
     config: Config,
     catalog: CatalogRepository,
+    ingest_batcher: CatalogIngestBatcher,
+    index_audit_batcher: IndexAuditBatcher,
 ) -> None:
-    await index_source_message(message, bot, config, catalog)
+    await index_source_message(
+        message,
+        bot,
+        config,
+        catalog,
+        ingest_batcher=ingest_batcher,
+        index_audit_batcher=index_audit_batcher,
+    )
 
 
 @router.edited_channel_post()
@@ -176,5 +212,14 @@ async def edited_channel_post(
     bot: Bot,
     config: Config,
     catalog: CatalogRepository,
+    ingest_batcher: CatalogIngestBatcher,
+    index_audit_batcher: IndexAuditBatcher,
 ) -> None:
-    await index_source_message(message, bot, config, catalog)
+    await index_source_message(
+        message,
+        bot,
+        config,
+        catalog,
+        ingest_batcher=ingest_batcher,
+        index_audit_batcher=index_audit_batcher,
+    )

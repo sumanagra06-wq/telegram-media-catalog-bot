@@ -6,6 +6,8 @@ This report records checks performed before packaging. It is not a claim that li
 
 - Telegram snapshot transaction order, manifest recovery, checksums and previous-revision fallback
 - Dynamic categories, legacy channels and idempotent source-message updates
+- Atomic high-throughput ingestion, compact burst audit summaries, synchronous webhook durability, and failed-batch rollback
+- Large-series navigation with 18+ seasons and paginated 50+ episode seasons
 - User access states, exact watchlist statuses, manual/catalog entry flows, and read-only public sharing
 - User-scoped watchlist mutation authorization and private-visibility enforcement
 - Owner-only catalog removal, tombstones, Telegram deletion retry, and manual-cleanup confirmation
@@ -79,6 +81,9 @@ This report records checks performed before packaging. It is not a claim that li
 35. Added catalog schema v3 episode-range persistence. Combined files such as `S18.Ep.1to15` and `Ep31To40` have no individual episode number, remain Season Pack records, sort by range start, and render/deliver as `Episodes X–Y`; split archives continue to render as `Part N`.
 36. Added owner-only broadcast composition in the Admin Control Center. It counts every stored profile across all statuses, accepts direct/replied text/photo/video/document sources, previews and confirms once, copies without action buttons with pacing/bounded retries, refreshes dashboards only for successful recipients, cleans the draft, records exact totals in the audit, and reports message/dashboard failures separately.
 37. Hardened broadcast dashboard persistence into one users-snapshot compare-and-set commit. Fresh cards are sent and pinned first; old cards are retired only after durable application, while storage/CAS failures unpin/delete the uncommitted replacements and preserve the tracked previous dashboards.
+38. Added an adaptive catalog ingestion batcher for the confirmed 100-file/two-minute burst pattern. Concurrent valid channel posts coalesce into atomic groups of up to 100, reducing full Telegram snapshot uploads from one per file to one per received burst group without acknowledging a webhook before durability. A failed batch rolls back as a unit and remains retryable.
+39. Replaced per-file burst audit cards with a bounded human-readable summary while preserving each file's individual catalog audit event. Search/browse/recent paths now copy only content summaries and use direct visibility checks instead of deep-copying the growing full file index. Health adds live file/pending-ingestion counts and current/maximum compressed snapshot bytes.
+40. Confirmed large-series flexibility with three-digit seasons, four-digit episodes, 20-episode UI pagination, and automated navigation coverage for 18 seasons plus a 55-episode season.
 
 No catalog record or Telegram source post was removed for the cancelled Doraemon/Nobita deletion request. This release contains no task-specific bulk deletion path.
 
@@ -87,11 +92,12 @@ No catalog record or Telegram source post was removed for the cancelled Doraemon
 - Ruff lint: passed
 - Ruff formatting check: passed
 - Python compileall: passed
-- Pytest with warnings treated as errors: passed (123 tests)
-- Test coverage: 66% overall; metadata parser 97%, snapshot storage 84%, repositories 77%, services 88%, panel handlers 54%, Watchlist handlers 60%, delivery/search handlers 58%, panel lifecycle manager 70%, UI 78%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
+- Pytest with warnings treated as errors: passed (125 tests)
+- Test coverage: 67% overall; burst ingestion 81%, metadata parser 97%, snapshot storage 84%, repositories 78%, services 88%, panel handlers 54%, Watchlist handlers 60%, delivery/search handlers 58%, panel lifecycle manager 70%, UI 78%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
+- Synthetic growth check: 9,000 distinct files across 90 atomic 100-file batches completed in 35.888 seconds locally; the deterministic gzip catalog was 846,636 bytes, or 4.49% of the enforced 18 MiB ceiling
 - Bandit: passed; the required Railway `0.0.0.0` bind is explicitly documented/suppressed
 - pip-audit: passed, no known vulnerabilities in production requirements
-- Mypy: core configuration, models, parser, storage, repositories, services, panel lifecycle, UI, presentation and command modules passed; changed admin/channel handlers and application startup also passed focused checks with imported modules skipped because Aiogram runtime narrowing is not represented statically
+- Mypy: core configuration, models, parser, storage, repositories, services, burst ingestion, panel lifecycle, UI, presentation and command modules passed; changed admin/channel handlers and application startup also passed focused checks with imported modules skipped because Aiogram runtime narrowing is not represented statically
 - Command/callback audit: only hidden `/start`, visible `/dashboard`, and hidden owner `/index` command handlers remain; new callbacks are bounded to Telegram's 64-byte limit, legacy privacy callbacks remain safe, and historical discovery bulk callbacks are mutation-free expiry handlers
 - Representative rendering audit: custom batches at the 25-title/160-character boundary and the expanded picker passed Telegram text/button length, callback-size, HTML escaping, style-value and no-custom-emoji checks
 - Placeholder scan: no TODO/FIXME/XXX/HACK/NotImplemented markers
@@ -111,6 +117,9 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Ordinary `S01E25`/`S01E38`/`S02E23` episodes and combined `Ep1to15`/`Ep31To40` ranges
 - Multiline unlabeled title parsing
 - Catalog schema-v2 → v3 migration and idempotence
+- A concurrent 100-file channel burst committing in one catalog revision and producing one compact audit summary
+- Full-batch rollback on injected snapshot failure followed by a successful delayed retry
+- 18-season title navigation and three-page rendering for a 55-episode season
 - Category creation and series grouping
 - Duplicate channel-update idempotency
 - Single-file metadata correction preserving content ID

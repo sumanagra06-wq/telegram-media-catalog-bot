@@ -27,6 +27,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..config import Config
 from ..filters import NotOwnerFilter, OwnerFilter
+from ..ingestion import CatalogIngestBatcher, IndexAuditBatcher
 from ..models import AccessMode, CategoryMode, RemovedSourceRecord, UserStatus
 from ..panels import PanelManager
 from ..presentation import ActionButton as InlineKeyboardButton
@@ -453,6 +454,8 @@ async def manual_index_command(
     bot: Bot,
     config: Config,
     catalog: CatalogRepository,
+    ingest_batcher: CatalogIngestBatcher,
+    index_audit_batcher: IndexAuditBatcher,
 ) -> None:
     source = message.reply_to_message
     if source is None or not (source.video or source.document):
@@ -481,6 +484,8 @@ async def manual_index_command(
         source_message_id=origin.message_id,
         source_title=origin.chat.title or str(origin.chat.id),
         allow_legacy=True,
+        ingest_batcher=ingest_batcher,
+        index_audit_batcher=index_audit_batcher,
     )
     if indexed:
         await message.answer("✅ The original channel post has been indexed.")

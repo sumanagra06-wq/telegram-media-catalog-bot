@@ -13,11 +13,17 @@ from aiohttp import web
 from .commands import register_commands
 from .config import Config, ConfigError
 from .handlers import admin, channel, common, panel, search, watchlist
+from .ingestion import CatalogIngestBatcher, IndexAuditBatcher
 from .models import CatalogState, UsersState
 from .panels import PanelActivityMiddleware, PanelManager
 from .repositories import CatalogRepairResult, CatalogRepository, UserRepository
 from .services import CatalogQueryService, SearchSessionStore
-from .storage import StateStore, StorageError, TelegramSnapshotBackend
+from .storage import (
+    MAX_COMPRESSED_SNAPSHOT_BYTES,
+    StateStore,
+    StorageError,
+    TelegramSnapshotBackend,
+)
 from .utils import safe_html
 
 LOGGER = logging.getLogger(__name__)
@@ -99,6 +105,8 @@ def create_application(config: Config) -> web.Application:
     query = CatalogQueryService(catalog)
     sessions = SearchSessionStore()
     panels = PanelManager(bot, users)
+    ingest_batcher = CatalogIngestBatcher(catalog)
+    index_audit_batcher = IndexAuditBatcher(bot, config.file_database_channel_id)
     runtime_status: dict[str, bool | None] = {"threaded_mode_enabled": None}
 
     dispatcher.callback_query.outer_middleware(PanelActivityMiddleware())
@@ -118,6 +126,8 @@ def create_application(config: Config) -> web.Application:
     dispatcher["query"] = query
     dispatcher["sessions"] = sessions
     dispatcher["panels"] = panels
+    dispatcher["ingest_batcher"] = ingest_batcher
+    dispatcher["index_audit_batcher"] = index_audit_batcher
 
     async def on_startup(bot: Bot) -> None:
         await _validate_database_channel(bot, config.file_database_channel_id, "file/catalog")
@@ -173,11 +183,13 @@ def create_application(config: Config) -> web.Application:
         LOGGER.info(
             "Started @%s with catalog r%s and users r%s",
             identity.username,
-            catalog.snapshot().revision,
+            catalog.revision(),
             users.snapshot().revision,
         )
 
     async def on_shutdown() -> None:
+        await ingest_batcher.shutdown()
+        await index_audit_batcher.shutdown()
         await panels.shutdown()
 
     dispatcher.startup.register(on_startup)
@@ -189,11 +201,15 @@ def create_application(config: Config) -> web.Application:
         try:
             data = {
                 "status": "ok",
-                "catalog_revision": catalog.snapshot().revision,
+                "catalog_revision": catalog.revision(),
+                "catalog_files": catalog.file_count(),
+                "catalog_snapshot_bytes": catalog_backend.current_compressed_size(),
+                "catalog_snapshot_limit_bytes": MAX_COMPRESSED_SNAPSHOT_BYTES,
                 "users_revision": users.snapshot().revision,
                 "threaded_mode_enabled": runtime_status["threaded_mode_enabled"],
                 "delivery_mode": "flat_chat",
                 "pending_legacy_topics": panels.pending_delivery_topic_count(),
+                "pending_catalog_ingest": ingest_batcher.pending_count(),
             }
             return web.json_response(data)
         except StorageError:

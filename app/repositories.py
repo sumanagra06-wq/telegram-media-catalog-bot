@@ -56,6 +56,17 @@ class BulkWatchlistResult:
     updated: int
 
 
+@dataclass(frozen=True)
+class FileUpsertRequest:
+    category_id: str
+    source_chat_id: int
+    source_message_id: int
+    telegram_file_id: str
+    telegram_file_unique_id: str
+    media_type: MediaType
+    metadata: ParsedMetadata
+
+
 def _source_key(chat_id: int, message_id: int) -> str:
     return f"{chat_id}:{message_id}"
 
@@ -83,6 +94,12 @@ class CatalogRepository:
 
     def snapshot(self) -> CatalogState:
         return self.store.snapshot()
+
+    def revision(self) -> int:
+        return self.store.state.revision
+
+    def file_count(self) -> int:
+        return len(self.store.state.files)
 
     async def migrate_schema(self) -> bool:
         if self.store.state.schema_version >= 3:
@@ -122,6 +139,22 @@ class CatalogRepository:
         values = self.store.state.categories.values()
         result = [item.model_copy(deep=True) for item in values if include_disabled or item.enabled]
         return sorted(result, key=lambda item: item.name.casefold())
+
+    def list_contents(self) -> list[ContentRecord]:
+        """Copy content summaries without cloning the potentially much larger file index."""
+        return [item.model_copy(deep=True) for item in self.store.state.contents.values()]
+
+    def content_is_visible(self, content_id: str) -> bool:
+        content = self.store.state.contents.get(content_id)
+        if content is None:
+            return False
+        category = self.store.state.categories.get(content.category_id)
+        if category is None or not category.enabled:
+            return False
+        return any(
+            (record := self.store.state.files.get(file_id)) is not None and record.available
+            for file_id in content.file_ids
+        )
 
     async def add_category(
         self,
@@ -438,6 +471,7 @@ class CatalogRepository:
         state: CatalogState,
         category_id: str,
         metadata: ParsedMetadata,
+        candidates_by_title: dict[tuple[str, str], list[ContentRecord]] | None = None,
     ) -> ContentRecord | None:
         normalized = normalize_title(metadata.title)
         exact_key = f"{category_id}|{normalized}|{metadata.year or '?'}"
@@ -445,11 +479,15 @@ class CatalogRepository:
         exact = state.contents.get(exact_id) if exact_id else None
         if exact is not None:
             return exact
-        candidates = [
-            item
-            for item in state.contents.values()
-            if item.category_id == category_id and item.normalized_title == normalized
-        ]
+        candidates = (
+            candidates_by_title.get((category_id, normalized), [])
+            if candidates_by_title is not None
+            else [
+                item
+                for item in state.contents.values()
+                if item.category_id == category_id and item.normalized_title == normalized
+            ]
+        )
         if metadata.year is not None:
             unknown = next((item for item in candidates if item.year is None), None)
             if unknown:
@@ -459,6 +497,182 @@ class CatalogRepository:
             return candidates[0]
         unknown = next((item for item in candidates if item.year is None), None)
         return unknown
+
+    @staticmethod
+    def _canonical_metadata(metadata: ParsedMetadata) -> ParsedMetadata:
+        # Enforce one stable series identity at the persistence boundary even if a future
+        # caption-parser branch accidentally leaves SxxExx or technical suffixes in the title.
+        if (
+            metadata.season is not None
+            or metadata.episode is not None
+            or metadata.episode_start is not None
+        ):
+            canonical_title = canonicalize_title(metadata.title)
+            if canonical_title and canonical_title != metadata.title:
+                return metadata.model_copy(update={"title": canonical_title})
+        return metadata
+
+    def _upsert_file_state(
+        self,
+        state: CatalogState,
+        request: FileUpsertRequest,
+        candidates_by_title: dict[tuple[str, str], list[ContentRecord]] | None = None,
+    ) -> tuple[FileRecord, ContentRecord, bool]:
+        metadata = self._canonical_metadata(request.metadata)
+        source = _source_key(request.source_chat_id, request.source_message_id)
+        if source in state.removed_sources:
+            raise ValueError("This source message was permanently removed by the owner")
+        category = state.categories.get(request.category_id)
+        if category is None:
+            raise ValueError("Category not found")
+        old_file_id = state.source_lookup.get(source)
+        old_file = state.files.get(old_file_id) if old_file_id else None
+        is_new = old_file is None
+
+        content = self._choose_content(
+            state,
+            request.category_id,
+            metadata,
+            candidates_by_title,
+        )
+        reused_old_content = False
+        if content is None and old_file is not None:
+            old_content = state.contents.get(old_file.content_id)
+            if old_content is not None and old_content.file_ids == [old_file.id]:
+                # Correcting the only file's title/year should preserve content deep links and
+                # watchlist relationships rather than create a ghost content record.
+                content = old_content
+                reused_old_content = True
+        content_kind = (
+            ContentKind.SERIES
+            if metadata.season is not None or metadata.episode is not None
+            else ContentKind.MOVIE
+        )
+        if content is None:
+            normalized = normalize_title(metadata.title)
+            group_key = f"{request.category_id}|{normalized}|{metadata.year or '?'}"
+            content = ContentRecord(
+                id=make_id("c"),
+                group_key=group_key,
+                category_id=request.category_id,
+                title=metadata.title,
+                normalized_title=normalized,
+                year=metadata.year,
+                kind=content_kind,
+            )
+            state.contents[content.id] = content
+            state.content_lookup[group_key] = content.id
+            if candidates_by_title is not None:
+                candidates_by_title.setdefault((request.category_id, normalized), []).append(
+                    content
+                )
+        else:
+            old_key = content.group_key
+            old_title_key = (content.category_id, content.normalized_title)
+            content.title = metadata.title
+            content.normalized_title = normalize_title(metadata.title)
+            if metadata.year is not None and (reused_old_content or content.year is None):
+                content.year = metadata.year
+            content.group_key = (
+                f"{request.category_id}|{content.normalized_title}|{content.year or '?'}"
+            )
+            if old_key != content.group_key:
+                state.content_lookup.pop(old_key, None)
+            state.content_lookup[content.group_key] = content.id
+            if candidates_by_title is not None:
+                new_title_key = (content.category_id, content.normalized_title)
+                if new_title_key != old_title_key:
+                    candidates_by_title[old_title_key] = [
+                        item
+                        for item in candidates_by_title.get(old_title_key, [])
+                        if item.id != content.id
+                    ]
+                    candidates_by_title.setdefault(new_title_key, []).append(content)
+            if content_kind == ContentKind.SERIES:
+                content.kind = ContentKind.SERIES
+            content.updated_at = utcnow_iso()
+
+        if metadata.episode is not None:
+            record_kind = RecordKind.EPISODE
+        elif metadata.season is not None:
+            record_kind = RecordKind.SEASON_PACK_PART
+        else:
+            record_kind = RecordKind.MOVIE
+
+        file_id = old_file.id if old_file else make_id("f")
+        created_at = old_file.created_at if old_file else utcnow_iso()
+        record = FileRecord(
+            id=file_id,
+            content_id=content.id,
+            category_id=request.category_id,
+            source_chat_id=request.source_chat_id,
+            source_message_id=request.source_message_id,
+            telegram_file_id=request.telegram_file_id,
+            telegram_file_unique_id=request.telegram_file_unique_id,
+            media_type=request.media_type,
+            record_kind=record_kind,
+            title=metadata.title,
+            year=metadata.year or content.year,
+            languages=metadata.languages,
+            quality=metadata.quality,
+            season=metadata.season,
+            episode=metadata.episode,
+            episode_start=metadata.episode_start,
+            episode_end=metadata.episode_end,
+            pack_part=metadata.pack_part
+            or (1 if record_kind == RecordKind.SEASON_PACK_PART else None),
+            available=True,
+            created_at=created_at,
+            updated_at=utcnow_iso(),
+        )
+
+        if old_file and old_file.content_id != content.id:
+            old_content = state.contents.get(old_file.content_id)
+            if old_content and file_id in old_content.file_ids:
+                old_content.file_ids.remove(file_id)
+                old_content.updated_at = utcnow_iso()
+        state.files[file_id] = record
+        state.source_lookup[source] = file_id
+        if file_id not in content.file_ids:
+            content.file_ids.append(file_id)
+        content.updated_at = utcnow_iso()
+        state.failures.pop(source, None)
+        _append_audit(
+            state,
+            "index.add" if is_new else "index.update",
+            f"{metadata.title} from {source}",
+        )
+        return (
+            record.model_copy(deep=True),
+            content.model_copy(deep=True),
+            is_new,
+        )
+
+    async def upsert_files(
+        self,
+        requests: list[FileUpsertRequest],
+    ) -> list[tuple[FileRecord, ContentRecord, bool]]:
+        """Persist a validated ingestion burst in one catalog snapshot transaction."""
+        if not requests:
+            return []
+
+        def mutate(state: CatalogState) -> list[tuple[FileRecord, ContentRecord, bool]]:
+            # Validation failures occur before a request mutates state. A failed batch therefore
+            # leaves both durable and in-memory catalog state unchanged through StateStore.
+            for request in requests:
+                source = _source_key(request.source_chat_id, request.source_message_id)
+                if source in state.removed_sources:
+                    raise ValueError("This source message was permanently removed by the owner")
+                if request.category_id not in state.categories:
+                    raise ValueError("Category not found")
+            candidates_by_title: dict[tuple[str, str], list[ContentRecord]] = defaultdict(list)
+            for content in state.contents.values():
+                candidates_by_title[(content.category_id, content.normalized_title)].append(content)
+            return [
+                self._upsert_file_state(state, request, candidates_by_title) for request in requests
+            ]
+
+        return await self.store.mutate(mutate)
 
     async def upsert_file(
         self,
@@ -471,129 +685,16 @@ class CatalogRepository:
         media_type: MediaType,
         metadata: ParsedMetadata,
     ) -> tuple[FileRecord, ContentRecord, bool]:
-        # Enforce one stable series identity at the persistence boundary even if a future
-        # caption-parser branch accidentally leaves SxxExx or technical suffixes in the title.
-        if (
-            metadata.season is not None
-            or metadata.episode is not None
-            or metadata.episode_start is not None
-        ):
-            canonical_title = canonicalize_title(metadata.title)
-            if canonical_title and canonical_title != metadata.title:
-                metadata = metadata.model_copy(update={"title": canonical_title})
-        source = _source_key(source_chat_id, source_message_id)
-
-        def mutate(state: CatalogState) -> tuple[FileRecord, ContentRecord, bool]:
-            if source in state.removed_sources:
-                raise ValueError("This source message was permanently removed by the owner")
-            category = state.categories.get(category_id)
-            if category is None:
-                raise ValueError("Category not found")
-            old_file_id = state.source_lookup.get(source)
-            old_file = state.files.get(old_file_id) if old_file_id else None
-            is_new = old_file is None
-
-            content = self._choose_content(state, category_id, metadata)
-            reused_old_content = False
-            if content is None and old_file is not None:
-                old_content = state.contents.get(old_file.content_id)
-                if old_content is not None and old_content.file_ids == [old_file.id]:
-                    # Correcting the only file's title/year should preserve content deep links and
-                    # watchlist relationships rather than create a ghost content record.
-                    content = old_content
-                    reused_old_content = True
-            content_kind = (
-                ContentKind.SERIES
-                if metadata.season is not None or metadata.episode is not None
-                else ContentKind.MOVIE
-            )
-            if content is None:
-                normalized = normalize_title(metadata.title)
-                group_key = f"{category_id}|{normalized}|{metadata.year or '?'}"
-                content = ContentRecord(
-                    id=make_id("c"),
-                    group_key=group_key,
-                    category_id=category_id,
-                    title=metadata.title,
-                    normalized_title=normalized,
-                    year=metadata.year,
-                    kind=content_kind,
-                )
-                state.contents[content.id] = content
-                state.content_lookup[group_key] = content.id
-            else:
-                old_key = content.group_key
-                content.title = metadata.title
-                content.normalized_title = normalize_title(metadata.title)
-                if metadata.year is not None and (reused_old_content or content.year is None):
-                    content.year = metadata.year
-                content.group_key = (
-                    f"{category_id}|{content.normalized_title}|{content.year or '?'}"
-                )
-                if old_key != content.group_key:
-                    state.content_lookup.pop(old_key, None)
-                state.content_lookup[content.group_key] = content.id
-                if content_kind == ContentKind.SERIES:
-                    content.kind = ContentKind.SERIES
-                content.updated_at = utcnow_iso()
-
-            if metadata.episode is not None:
-                record_kind = RecordKind.EPISODE
-            elif metadata.season is not None:
-                record_kind = RecordKind.SEASON_PACK_PART
-            else:
-                record_kind = RecordKind.MOVIE
-
-            file_id = old_file.id if old_file else make_id("f")
-            created_at = old_file.created_at if old_file else utcnow_iso()
-            record = FileRecord(
-                id=file_id,
-                content_id=content.id,
-                category_id=category_id,
-                source_chat_id=source_chat_id,
-                source_message_id=source_message_id,
-                telegram_file_id=telegram_file_id,
-                telegram_file_unique_id=telegram_file_unique_id,
-                media_type=media_type,
-                record_kind=record_kind,
-                title=metadata.title,
-                year=metadata.year or content.year,
-                languages=metadata.languages,
-                quality=metadata.quality,
-                season=metadata.season,
-                episode=metadata.episode,
-                episode_start=metadata.episode_start,
-                episode_end=metadata.episode_end,
-                pack_part=metadata.pack_part
-                or (1 if record_kind == RecordKind.SEASON_PACK_PART else None),
-                available=True,
-                created_at=created_at,
-                updated_at=utcnow_iso(),
-            )
-
-            if old_file and old_file.content_id != content.id:
-                old_content = state.contents.get(old_file.content_id)
-                if old_content and file_id in old_content.file_ids:
-                    old_content.file_ids.remove(file_id)
-                    old_content.updated_at = utcnow_iso()
-            state.files[file_id] = record
-            state.source_lookup[source] = file_id
-            if file_id not in content.file_ids:
-                content.file_ids.append(file_id)
-            content.updated_at = utcnow_iso()
-            state.failures.pop(source, None)
-            _append_audit(
-                state,
-                "index.add" if is_new else "index.update",
-                f"{metadata.title} from {source}",
-            )
-            return (
-                record.model_copy(deep=True),
-                content.model_copy(deep=True),
-                is_new,
-            )
-
-        return await self.store.mutate(mutate)
+        request = FileUpsertRequest(
+            category_id=category_id,
+            source_chat_id=source_chat_id,
+            source_message_id=source_message_id,
+            telegram_file_id=telegram_file_id,
+            telegram_file_unique_id=telegram_file_unique_id,
+            media_type=media_type,
+            metadata=metadata,
+        )
+        return (await self.upsert_files([request]))[0]
 
     async def remove_content(
         self,

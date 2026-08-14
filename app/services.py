@@ -86,8 +86,7 @@ class CatalogQueryService:
         self.catalog = catalog
 
     def _is_visible(self, content: ContentRecord) -> bool:
-        category = self.catalog.get_category(content.category_id)
-        return bool(category and category.enabled and self.catalog.files_for_content(content.id))
+        return self.catalog.content_is_visible(content.id)
 
     def search(self, raw_query: str) -> list[SearchHit]:
         raw_query = " ".join(raw_query.split()).strip()
@@ -99,7 +98,7 @@ class CatalogQueryService:
             return []
 
         hits: list[SearchHit] = []
-        for content in self.catalog.snapshot().contents.values():
+        for content in self.catalog.list_contents():
             if not self._is_visible(content):
                 continue
             candidate_values = [content.normalized_title]
@@ -138,20 +137,15 @@ class CatalogQueryService:
         return hits
 
     def browse_category(self, category_id: str) -> list[ContentRecord]:
-        state = self.catalog.snapshot()
         values = [
-            item.model_copy(deep=True)
-            for item in state.contents.values()
+            item
+            for item in self.catalog.list_contents()
             if item.category_id == category_id and self._is_visible(item)
         ]
         return sorted(values, key=lambda item: (item.title.casefold(), item.year or 0))
 
     def recently_added(self, limit: int = 30) -> list[ContentRecord]:
-        values = [
-            item.model_copy(deep=True)
-            for item in self.catalog.snapshot().contents.values()
-            if self._is_visible(item)
-        ]
+        values = [item for item in self.catalog.list_contents() if self._is_visible(item)]
         return sorted(values, key=lambda item: item.updated_at, reverse=True)[:limit]
 
     def files(self, content_id: str) -> list[FileRecord]:
