@@ -19,6 +19,7 @@ from .models import (
     MediaType,
     RecordKind,
     RemovedSourceRecord,
+    TemporaryDeliveryRef,
     UserProfile,
     UsersState,
     UserStatus,
@@ -830,7 +831,7 @@ class UserRepository:
         return self.store.snapshot()
 
     async def migrate_schema(self) -> bool:
-        needs_migration = self.store.state.schema_version < 7 or any(
+        needs_migration = self.store.state.schema_version < 8 or any(
             not entry.id or key != entry.id
             for user in self.store.state.users.values()
             for key, entry in user.watchlist.items()
@@ -856,7 +857,7 @@ class UserRepository:
                     changed = True
                 if changed:
                     user.updated_at = utcnow_iso()
-            state.schema_version = 7
+            state.schema_version = 8
             return True
 
         return await self.store.mutate(mutate)
@@ -1094,6 +1095,132 @@ class UserRepository:
                 user.updated_at = now
                 cleared += 1
             return cleared
+
+        return await self.store.mutate(mutate)
+
+    def list_temporary_deliveries(self) -> list[tuple[int, TemporaryDeliveryRef]]:
+        deliveries: list[tuple[int, TemporaryDeliveryRef]] = []
+        for user in self.store.state.users.values():
+            deliveries.extend(
+                (user.telegram_user_id, item.model_copy(deep=True))
+                for item in user.temporary_deliveries
+            )
+        return deliveries
+
+    async def add_temporary_delivery(
+        self,
+        user_id: int,
+        delivery: TemporaryDeliveryRef,
+    ) -> TemporaryDeliveryRef:
+        current = self.store.state.users.get(str(user_id))
+        if current is None:
+            raise ValueError("User not found")
+        duplicate = next(
+            (
+                item
+                for item in current.temporary_deliveries
+                if item.media_message_id == delivery.media_message_id
+            ),
+            None,
+        )
+        if duplicate is not None:
+            if duplicate == delivery:
+                return duplicate.model_copy(deep=True)
+            raise ValueError("Temporary delivery message is already registered")
+
+        def mutate(state: UsersState) -> TemporaryDeliveryRef:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            if any(
+                item.media_message_id == delivery.media_message_id
+                for item in user.temporary_deliveries
+            ):
+                raise ValueError("Temporary delivery message is already registered")
+            stored = delivery.model_copy(deep=True)
+            user.temporary_deliveries.append(stored)
+            user.updated_at = utcnow_iso()
+            return stored.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def attach_temporary_delivery_notice(
+        self,
+        user_id: int,
+        media_message_id: int,
+        notice_message_id: int,
+    ) -> TemporaryDeliveryRef:
+        current = self.store.state.users.get(str(user_id))
+        if current is None:
+            raise ValueError("User not found")
+        matching = next(
+            (
+                item
+                for item in current.temporary_deliveries
+                if item.media_message_id == media_message_id
+            ),
+            None,
+        )
+        if matching is None:
+            raise ValueError("Temporary delivery is not registered")
+        if matching.notice_message_id == notice_message_id:
+            return matching.model_copy(deep=True)
+        if matching.notice_message_id is not None:
+            raise ValueError("Temporary delivery notice is already registered")
+
+        def mutate(state: UsersState) -> TemporaryDeliveryRef:
+            user = state.users.get(str(user_id))
+            if user is None:
+                raise ValueError("User not found")
+            for item in user.temporary_deliveries:
+                if item.media_message_id != media_message_id:
+                    continue
+                if item.notice_message_id is not None:
+                    raise ValueError("Temporary delivery notice is already registered")
+                item.notice_message_id = notice_message_id
+                user.updated_at = utcnow_iso()
+                return item.model_copy(deep=True)
+            raise ValueError("Temporary delivery is not registered")
+
+        return await self.store.mutate(mutate)
+
+    async def remove_temporary_delivery(
+        self,
+        user_id: int,
+        media_message_id: int,
+        *,
+        expected_notice_message_id: int | None = None,
+        match_notice: bool = False,
+    ) -> bool:
+        current = self.store.state.users.get(str(user_id))
+        if current is None:
+            return False
+        matching = next(
+            (
+                item
+                for item in current.temporary_deliveries
+                if item.media_message_id == media_message_id
+            ),
+            None,
+        )
+        if matching is None or (
+            match_notice and matching.notice_message_id != expected_notice_message_id
+        ):
+            return False
+
+        def mutate(state: UsersState) -> bool:
+            user = state.users.get(str(user_id))
+            if user is None:
+                return False
+            for index, item in enumerate(user.temporary_deliveries):
+                if item.media_message_id != media_message_id:
+                    continue
+                if match_notice and item.notice_message_id != expected_notice_message_id:
+                    return False
+                del user.temporary_deliveries[index]
+                user.updated_at = utcnow_iso()
+                return True
+            return False
 
         return await self.store.mutate(mutate)
 

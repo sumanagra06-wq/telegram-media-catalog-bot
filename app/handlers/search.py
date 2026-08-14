@@ -18,7 +18,6 @@ from ..ui import (
     content_screen,
     no_results,
     pack_screen,
-    panel_dashboard,
     search_results,
     season_screen,
     variants_screen,
@@ -249,7 +248,7 @@ async def episode_callback(
         await callback.answer("This episode is unavailable.", show_alert=True)
         return
     if len(variants) == 1:
-        await callback.answer("Preparing secure delivery…")
+        await callback.answer("Preparing temporary file…")
         await _deliver_file(callback, variants[0].id, bot, catalog, config, panels)
         return
     text, markup = variants_screen(
@@ -295,16 +294,16 @@ async def _copy_to_private_chat(
     source_chat_id: int,
     source_message_id: int,
     caption: str,
-    protect_content: bool,
-) -> None:
-    await bot.copy_message(
+) -> int:
+    message = await bot.copy_message(
         chat_id=user_id,
         from_chat_id=source_chat_id,
         message_id=source_message_id,
         caption=caption,
         parse_mode="HTML",
-        protect_content=protect_content,
+        protect_content=False,
     )
+    return message.message_id
 
 
 async def _send_file_id_to_private_chat(
@@ -313,63 +312,48 @@ async def _send_file_id_to_private_chat(
     user_id: int,
     record: FileRecord,
     caption: str,
-    protect_content: bool,
-) -> None:
+) -> int:
     if record.media_type == MediaType.VIDEO:
-        await bot.send_video(
+        message = await bot.send_video(
             chat_id=user_id,
             video=record.telegram_file_id,
             caption=caption,
             parse_mode="HTML",
-            protect_content=protect_content,
+            protect_content=False,
         )
     else:
-        await bot.send_document(
+        message = await bot.send_document(
             chat_id=user_id,
             document=record.telegram_file_id,
             caption=caption,
             parse_mode="HTML",
-            protect_content=protect_content,
+            protect_content=False,
         )
+    return message.message_id
 
 
 async def _finish_delivery(
     *,
     callback: CallbackQuery,
     bot: Bot,
-    panels: PanelManager | None,
-    config: Config,
+    panels: PanelManager,
 ) -> None:
     user_id = callback.from_user.id
     source_message_id = (
         getattr(callback.message, "message_id", None) if callback.message is not None else None
     )
     closed_workspace_id: int | None = None
-    if panels is not None:
-        try:
-            closed_workspace_id = await panels.close_current_workspace(user_id)
-        except (StorageError, ValueError, TelegramAPIError):
-            LOGGER.warning("Could not retire workspace for user %s", user_id, exc_info=True)
+    try:
+        closed_workspace_id = await panels.close_current_workspace(user_id)
+    except (StorageError, ValueError, TelegramAPIError):
+        LOGGER.warning("Could not retire workspace for user %s", user_id, exc_info=True)
     if source_message_id is not None and source_message_id != closed_workspace_id:
         try:
             await bot.delete_message(user_id, source_message_id)
         except TelegramAPIError:
             LOGGER.info("Could not auto-clean delivery source card %s", source_message_id)
-
-    if panels is None:
-        return
-    text, markup = panel_dashboard(config.is_owner(user_id), callback.from_user.first_name)
-    try:
-        await panels.repost_dashboard(
-            user_id=user_id,
-            text=text,
-            reply_markup=markup,
-        )
-    except (StorageError, ValueError, TelegramAPIError):
-        # The protected file is already delivered; dashboard recovery is independent.
-        LOGGER.warning(
-            "Delivery succeeded but dashboard repost failed for user %s", user_id, exc_info=True
-        )
+    # The permanent pinned dashboard is intentionally untouched. Only owner broadcasts and the
+    # explicit emergency recovery command post a fresh dashboard.
 
 
 async def _deliver_file_now(
@@ -380,6 +364,12 @@ async def _deliver_file_now(
     config: Config,
     panels: PanelManager | None,
 ) -> None:
+    if panels is None:
+        await callback.message.answer(
+            "⚠️ <b>DELIVERY TEMPORARILY UNAVAILABLE</b>\n"
+            "The safe expiry service is not ready. Please try again in a moment."
+        )
+        return
     record = catalog.get_file(file_id)
     if record is None or not record.available:
         await callback.message.answer(
@@ -397,13 +387,12 @@ async def _deliver_file_now(
 
     caption = delivery_caption(record, content.kind, category.name)
     try:
-        await _copy_to_private_chat(
+        delivered_message_id = await _copy_to_private_chat(
             bot=bot,
             user_id=callback.from_user.id,
             source_chat_id=record.source_chat_id,
             source_message_id=record.source_message_id,
             caption=caption,
-            protect_content=config.protect_delivered_content,
         )
     except TelegramForbiddenError:
         # Usually means the user blocked the bot; the source record is still valid.
@@ -418,12 +407,11 @@ async def _deliver_file_now(
             )
             return
         try:
-            await _send_file_id_to_private_chat(
+            delivered_message_id = await _send_file_id_to_private_chat(
                 bot=bot,
                 user_id=callback.from_user.id,
                 record=record,
                 caption=caption,
-                protect_content=config.protect_delivered_content,
             )
         except TelegramForbiddenError:
             return
@@ -447,11 +435,75 @@ async def _deliver_file_now(
                     LOGGER.info("Could not notify owner %s about unavailable file", owner_id)
             return
 
+    # Anchor and persist the media ID as soon as Telegram confirms the copy. A process crash while
+    # sending the reminder can no longer orphan an otherwise unknown file message.
+    expires_at = panels.delivery_expires_at()
+    try:
+        await panels.register_temporary_delivery(
+            user_id=callback.from_user.id,
+            media_message_id=delivered_message_id,
+            notice_message_id=None,
+            expires_at=expires_at,
+        )
+    except (StorageError, ValueError):
+        await callback.message.answer(
+            "⚠️ <b>DELIVERY INTERRUPTED</b>\n"
+            "The temporary file was removed because its five-minute cleanup could not be saved. "
+            "Please try again."
+        )
+        return
+
+    try:
+        notice = await bot.send_message(
+            callback.from_user.id,
+            "⏳ <b>SAVE WITHIN 5 MINUTES</b>\n"
+            "Save/download the file now, or forward it to Saved Messages or another chat. "
+            "The file and this reminder will auto-delete.",
+        )
+    except TelegramAPIError:
+        deleted = await panels.discard_registered_temporary_delivery(
+            user_id=callback.from_user.id,
+            media_message_id=delivered_message_id,
+        )
+        LOGGER.warning(
+            "Expiry notice failed for file %s belonging to user %s; immediate cleanup %s",
+            delivered_message_id,
+            callback.from_user.id,
+            "completed" if deleted else "will retry from its durable record",
+        )
+        return
+
+    try:
+        await panels.attach_temporary_delivery_notice(
+            user_id=callback.from_user.id,
+            media_message_id=delivered_message_id,
+            notice_message_id=notice.message_id,
+        )
+    except (StorageError, ValueError):
+        deleted = await panels.discard_registered_temporary_delivery(
+            user_id=callback.from_user.id,
+            media_message_id=delivered_message_id,
+            notice_message_id=notice.message_id,
+        )
+        if not deleted:
+            # The provisional record may already have expired while Telegram was sending the
+            # reminder; delete the late reminder even when no durable record remains.
+            await panels.discard_delivery_messages(
+                user_id=callback.from_user.id,
+                media_message_id=delivered_message_id,
+                notice_message_id=notice.message_id,
+            )
+        await callback.message.answer(
+            "⚠️ <b>DELIVERY INTERRUPTED</b>\n"
+            "The temporary file was removed because its reminder could not be safely tracked. "
+            "Please try again."
+        )
+        return
+
     await _finish_delivery(
         callback=callback,
         bot=bot,
         panels=panels,
-        config=config,
     )
 
 
@@ -482,5 +534,5 @@ async def file_callback(
     if await _active_callback(callback, users, config) is None:
         return
     file_id = callback.data.split(":", 1)[1]
-    await callback.answer("Preparing secure delivery…")
+    await callback.answer("Preparing temporary file…")
     await _deliver_file(callback, file_id, bot, catalog, config, panels)

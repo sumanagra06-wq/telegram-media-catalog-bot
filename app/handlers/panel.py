@@ -264,9 +264,9 @@ async def panel_help_callback(
         f"{DIVIDER}\n"
         "<b>1.</b> 🔎 Send a title or use Search\n"
         "<b>2.</b> 🎯 Open the matching title and choose its file\n"
-        "<b>3.</b> 🔐 Receive the permanent protected file in this chat\n"
+        "<b>3.</b> 🔓 Save or forward the delivered file within 5 minutes\n"
         "<b>4.</b> 📚 Use Watchlist—not Search—to save titles\n\n"
-        "🧹 Queries and temporary cards are removed; one fresh dashboard follows delivery.\n"
+        "🧹 Queries, file copies, and temporary cards expire; the pinned dashboard stays.\n"
         "⏱ Every workspace interaction restarts its 5-minute timer.",
         builder.as_markup(),
     )

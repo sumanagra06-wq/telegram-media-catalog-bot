@@ -21,9 +21,10 @@ This report records checks performed before packaging. It is not a claim that li
 - Always-public community Watchlists with editable, HTML-safe display names and visible usernames, including owner edit/reset moderation
 - Explicit status and dynamic-category labels on every own/shared Watchlist title card and detail screen
 - Retry-safe destructive retirement of all persisted legacy per-user delivery/category topics
-- Direct flat private-chat delivery for protected movies, episodes, documents, and season packs without topic routing
-- Permanent file-only deliveries with premium captions and no action keyboards
-- Typed-title query cleanup, temporary discovery-card cleanup, and fresh dashboard replacement/pinning after every successful delivery
+- Direct flat private-chat delivery for unprotected, save/forward-enabled movies, episodes, documents, and season packs without topic routing
+- Temporary button-free media with premium captions and a concise save/forward reminder directly below
+- Persisted schema-v8 file/reminder expiry records, five-minute deletion, transient-failure retry, and restart recovery for future/already-expired records
+- Typed-title query cleanup and temporary discovery-card cleanup while file delivery leaves the permanent pinned dashboard untouched
 - Unified owner dashboard with an authorization-checked Admin Control Center entry
 - Owner-only all-profile broadcast preview/confirmation, retry-aware source copying, per-recipient dashboard replacement, exact totals, cleanup, and audit
 - One-commit compare-and-set persistence for bulk dashboard references, including rollback and partial-failure behavior
@@ -32,7 +33,7 @@ This report records checks performed before packaging. It is not a claim that li
 - Absence of custom-emoji dependencies and preservation of existing callback contracts
 - Series episodes, variants, split season packs, and combined episode-range Season Packs
 - Additive `MOVIES.IN`/numbered-movie parsing and descriptive attachment-filename authority for mixed captions
-- Protected direct delivery, structured delivery captions and flat-chat Telegram file-ID fallback
+- Explicit `protect_content=False` delivery, structured premium captions, and flat-chat video/document Telegram file-ID fallback
 - BotFather Threaded Mode startup/health visibility plus explicit normal-chat disablement guidance
 - Dashboard-final native command scope, emergency dashboard repost/rollback, hidden `/start` onboarding, and owner-only reply-based `/index` recovery
 - Private-chat and owner authorization filters
@@ -85,6 +86,7 @@ This report records checks performed before packaging. It is not a claim that li
 39. Replaced per-file burst audit cards with a bounded human-readable summary while preserving each file's individual catalog audit event. Search/browse/recent paths now copy only content summaries and use direct visibility checks instead of deep-copying the growing full file index. Health adds live file/pending-ingestion counts and current/maximum compressed snapshot bytes.
 40. Confirmed large-series flexibility with three-digit seasons, four-digit episodes, 20-episode UI pagination, and automated navigation coverage for 18 seasons plus a 55-episode season.
 41. Hardened Telegram persistence against the observed `RetryAfter: retry in 34 seconds` response. Snapshot uploads and manifest commits now honor the full server-requested delay with bounded retries; batched index audits, dashboard operations, and broadcasts use the same non-early retry rule. Tests inject flood waits into both snapshot and audit-message paths.
+42. Superseded findings 19, 30, 31, and 33's permanent/protected file lifecycle with users schema v8. Requested-file copy and both video/document `file_id` fallbacks now force `protect_content=False` and return the delivered message ID. The media ID and five-minute UTC deadline are provisionally committed immediately after Telegram confirms the copy; a concise save/download/forward reminder then follows the file and its ID is attached durably before discovery UI is retired. The lifecycle deletes reminder then media, treats already-missing messages as success, retains failed records for retry, cancels only in-memory tasks on shutdown, and reschedules future or already-expired records at startup. Registration failure removes the untracked output; failed notice cleanup leaves the provisional media reference durable for deadline/restart retry. Successful file delivery never reposts, replaces, or repins the permanent dashboard. Pre-v8 files remain deliberately untracked for manual cleanup, while the owner Broadcast flow remains the explicit fresh-dashboard exception.
 
 No catalog record or Telegram source post was removed for the cancelled Doraemon/Nobita deletion request. This release contains no task-specific bulk deletion path.
 
@@ -93,8 +95,8 @@ No catalog record or Telegram source post was removed for the cancelled Doraemon
 - Ruff lint: passed
 - Ruff formatting check: passed
 - Python compileall: passed
-- Pytest with warnings treated as errors: passed (127 tests)
-- Test coverage: 67% overall; burst ingestion 85%, metadata parser 97%, snapshot storage 79%, repositories 78%, services 88%, panel handlers 54%, Watchlist handlers 60%, delivery/search handlers 58%, panel lifecycle manager 70%, UI 78%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
+- Pytest with warnings treated as errors: passed (141 tests)
+- Test coverage: 67% overall; burst ingestion 85%, metadata parser 97%, snapshot storage 79%, repositories 78%, services 88%, panel handlers 54%, Watchlist handlers 60%, delivery/search handlers 60%, panel lifecycle manager 73%, UI 78%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
 - Synthetic growth check: 9,000 distinct files across 90 atomic 100-file batches completed in 35.888 seconds locally; the deterministic gzip catalog was 846,636 bytes, or 4.49% of the enforced 18 MiB ceiling
 - Bandit: passed; the required Railway `0.0.0.0` bind is explicitly documented/suppressed
 - pip-audit: passed, no known vulnerabilities in production requirements
@@ -137,7 +139,7 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Optional style metadata preserving text and callback behavior on older clients
 - Main, Watchlist and admin dashboard callback-contract preservation
 - No custom-emoji IDs on primary dashboards
-- Plain-text user search → content screen → episode protected-delivery handler flow
+- Plain-text user search → content screen → unprotected temporary episode-delivery handler flow
 - Automatic channel-post indexing handler flow with allowlisted metadata only
 - Six separate `Operation Safed Sagar ... S01E01`–`S01E06` messages, including filename-style labels and forwarding warnings, grouping as one title with six files
 - Idempotent repair of a persisted six-title/six-file snapshot into one title/six files while preserving Telegram file IDs and source message references
@@ -170,26 +172,29 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - In-category search, unsaved-only filtering, Select Page, Clear Selection and selected-only review
 - Tick selection surviving filter changes and bulk status insertion from the dedicated Watchlist add flow
 - Community display-name editing, length validation, HTML escaping and username retention
-- Schema-v7 migration preserving schema-v4/v5/v6 Watchlists and legacy topic references while dropping receipt state
+- Schema-v8 migration preserving schema-v4/v5/v6/v7 Watchlists and legacy topic references, dropping old receipt state, and initializing no retroactive file expiries
 - Legacy single/category-topic deletion, duplicate-ID deduplication, already-unavailable handling, disabled-thread-mode retention, transient-failure retry/retention, and persistence-failure retry safety
-- Direct flat-chat copy without `message_thread_id` and Telegram document file-ID fallback when source copying is unavailable
-- Metadata-only permanent delivered files with no action keyboard
-- Repeated deliveries preserving every delivered file while removing temporary workspaces and retaining exactly one newly pinned dashboard
-- Failed fresh-dashboard persistence preserving the delivered file and previous tracked dashboard
+- Unprotected direct flat-chat copy without `message_thread_id` and unprotected Telegram video/document `file_id` fallback when source copying is unavailable
+- Premium metadata-only delivered media with no action keyboard, followed by a save/forward reminder
+- Persisted default 300-second expiry, file/reminder deletion, already-missing handling, transient/permanent deletion retry, and reference clearing
+- Process/snapshot restart recovery for both future and already-expired deliveries, including reloading the committed users snapshot
+- Delivery-registration and notice failures cleaning or durably tracking output instead of silently orphaning it
+- Repeated and concurrent same-user deliveries retaining independent expiry records while leaving the permanent dashboard ID and pin untouched
+- Broadcast-only fresh-dashboard behavior plus emergency `/dashboard` repost rollback
 - Dashboard-only command registration, emergency repost retirement of the old pinned card, and failed-snapshot rollback without losing the previous dashboard reference
 
 ## Honest remaining limits
 
 - The schema-v6 category-topic migration intentionally cleared the prior single-topic ID after renaming it `🗃 Previous Deliveries`. Telegram's Bot API cannot enumerate an unreferenced private-chat topic, so startup can safely delete every persisted topic but cannot rediscover that archived one. The owner must delete it manually if it remains visible before disabling Threaded Mode.
-- Automated tests use fakes and do not exercise destructive topic deletion, final flat delivery, or a complete broadcast against real Telegram private chats. Production startup logs can confirm retirement attempts and `/health` can confirm flat mode; one user-requested file and one controlled owner broadcast remain the definitive Telegram-client smoke tests. No credentials are copied into source or chat.
+- Automated tests use fakes and do not exercise destructive topic deletion, final temporary flat delivery, or a complete broadcast against real Telegram private chats. Production startup logs and `/health` expose recovery state; one requested file (including Save/forward and five-minute disappearance) plus one controlled owner broadcast remain the definitive Telegram-client smoke tests. No credentials are copied into source or chat.
 - Broadcast fan-out is intentionally in-process and confirmation-driven rather than a durable job queue. A Railway/process interruption during fan-out can leave a partial announcement without a final report; an interruption during the short prepare-before-commit dashboard window can also leave an untracked fresh Telegram card requiring manual cleanup. The absence of a final audit/report indicates interruption, and the owner must deliberately retry only if appropriate. This tradeoff matches the stated one-owner, roughly 40–50-user deployment and one-replica architecture.
 - Application code cannot disable BotFather Threaded Mode. After legacy topics are retired, the owner must disable it manually to restore Telegram's normal private-chat UI. Flat delivery itself does not depend on that setting.
 - Telegram-only persistence is appropriate for the stated 40–50-user scale, not high-write public scale.
-- The five-minute timers are intentionally in-process. Workspace IDs are persisted; restart cleanup deletes or disables every interrupted temporary workspace. Delivered file IDs are never tracked for automatic deletion.
+- Workspace inactivity timers remain in-process and startup clears interrupted workspace references. Delivered media/reminder IDs and UTC deadlines are persisted separately: a running replica targets five minutes, while downtime can delay deletion until startup recovery immediately processes overdue records. A simultaneous users-snapshot write failure and persistent Telegram deletion failure cannot be made atomic across the two remote systems; the code fails closed with bounded deletion retries and logs the exceptional condition. The media ID is persisted before sending the reminder, but Telegram offers no atomic send-and-database-commit primitive, so a hard process loss in the narrow interval after reminder-send success and before its ID commit can leave that text reminder untracked; attachment-persistence failures in a running process immediately delete both outputs.
 - Dashboard pinning is attempted through the Bot API. Hidden `/start` recovers onboarding/deep-link dashboards, while `/dashboard` deliberately reposts the emergency replacement; if Telegram denies replacement pinning, an existing tracked dashboard is preserved.
 - The standard Bot API cannot scan arbitrary old channel history; `/index` is required for missed old posts.
 - Telegram normally limits bot message deletion to messages sent within 48 hours. Older source posts require manual owner deletion; catalog tombstones still block delivery and re-indexing immediately.
-- Telegram protected content blocks normal official-client forwarding/saving but is not absolute DRM against modified clients or external capture.
+- Requested-file delivery is intentionally unprotected. Telegram cannot permit saving while independently blocking forwarding, so users can redistribute a file after saving/forwarding it; deleting the bot-chat copy after five minutes does not revoke external copies.
 - Older Telegram clients that predate semantic button styles render the same buttons with neutral/default styling; callback behavior is unchanged.
 - The normal Bot API snapshot download ceiling still applies; the app rejects compressed snapshots near that limit instead of silently corrupting recovery.
 - Exactly one Railway replica must remain configured because there is no external distributed lock.

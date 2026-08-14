@@ -37,18 +37,6 @@ def _parse_int(name: str) -> int:
         raise ConfigError(f"{name} must be an integer") from exc
 
 
-def _parse_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    normalized = value.strip().casefold()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise ConfigError(f"{name} must be true or false")
-
-
 @dataclass(frozen=True, slots=True)
 class Config:
     bot_token: str
@@ -61,7 +49,6 @@ class Config:
     host: str
     port: int
     log_level: str
-    protect_delivered_content: bool
 
     @property
     def webhook_url(self) -> str:
@@ -130,5 +117,4 @@ class Config:
             host=os.getenv("HOST", "0.0.0.0"),  # nosec B104
             port=port,
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
-            protect_delivered_content=_parse_bool("PROTECT_DELIVERED_CONTENT", True),
         )

@@ -1627,15 +1627,14 @@ async def audit_callback(callback: CallbackQuery, catalog: CatalogRepository) ->
     await edit_screen(callback, await _audit_text(catalog), builder.as_markup())
 
 
-def _settings_text(config: Config, users: UserRepository) -> str:
-    protection_icon = "✅" if config.protect_delivered_content else "⚠️"
+def _settings_text(users: UserRepository) -> str:
     return (
         "⚙️ <b>BOT SETTINGS</b>\n"
         "<blockquote>Current runtime configuration.</blockquote>\n"
         f"{DIVIDER}\n"
         f"🔐 <b>Access mode</b>  •  {safe_html(users.snapshot().access_mode.value.title())}\n"
-        f"{protection_icon} <b>Protected delivery</b>  •  "
-        f"{'Enabled' if config.protect_delivered_content else 'Disabled'}\n"
+        "✅ <b>Save & forward</b>  •  Enabled for delivered files\n"
+        "⏳ <b>File expiry</b>  •  5 minutes\n"
         "🔎 <b>Search page size</b>  •  4 results\n"
         "📱 <b>Interface</b>  •  dashboard-first native controls"
     )
@@ -1643,12 +1642,13 @@ def _settings_text(config: Config, users: UserRepository) -> str:
 
 @router.callback_query(F.data == "admin:settings", owner)
 async def bot_settings_callback(
-    callback: CallbackQuery, config: Config, users: UserRepository
+    callback: CallbackQuery,
+    users: UserRepository,
 ) -> None:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="◀️ Admin panel", callback_data="admin:home"))
     await callback.answer()
-    await edit_screen(callback, _settings_text(config, users), builder.as_markup())
+    await edit_screen(callback, _settings_text(users), builder.as_markup())
 
 
 @router.callback_query(F.data.startswith("admin:"), not_owner)

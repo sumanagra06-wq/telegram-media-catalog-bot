@@ -111,9 +111,9 @@ def panel_dashboard(
             f"👋 <b>Welcome{greeting}</b>\n\n"
             f"{DIVIDER}\n"
             "🔎 Search instantly or browse the complete catalog.\n"
-            "🔐 Protected files stay permanently in this private chat.\n"
+            "🔓 Save or forward each file within its 5-minute window.\n"
             "📚 Watchlist additions stay inside the Watchlist panel.\n"
-            "🧹 Search cards are temporary; the live dashboard refreshes after delivery.\n"
+            "🧹 Files and search cards expire; this pinned dashboard stays in place.\n"
             f"{DIVIDER}\n"
             "💡 Send a title directly in this chat whenever you prefer."
         ),
@@ -321,10 +321,10 @@ def content_screen(
         if not variants:
             lines.extend([DIVIDER, "🫙 <i>No files are available right now.</i>"])
         elif len(variants) == 1:
-            lines.extend([DIVIDER, "✅ <b>Ready for protected delivery</b>"])
+            lines.extend([DIVIDER, "✅ <b>Ready for temporary delivery</b>"])
             builder.row(
                 InlineKeyboardButton(
-                    text="▶️ Get protected file",
+                    text="▶️ Get file",
                     callback_data=f"fl:{variants[0].id}",
                     style="success",
                 )

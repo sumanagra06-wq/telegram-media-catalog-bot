@@ -220,7 +220,7 @@ def delivery_caption(file: FileRecord, kind: ContentKind, category_name: str) ->
     icon = "📺" if kind == ContentKind.SERIES else "🎬"
     lines = [
         f"{icon} <b>{safe_html(file.title)}</b>",
-        f"<blockquote>{safe_html(category_name)} collection • protected delivery</blockquote>",
+        f"<blockquote>{safe_html(category_name)} collection • temporary delivery</blockquote>",
         "━━━━━━━━━━━━━━━━━━",
     ]
     if file.record_kind == RecordKind.EPISODE:
@@ -242,7 +242,7 @@ def delivery_caption(file: FileRecord, kind: ContentKind, category_name: str) ->
             + safe_html(", ".join(file.languages) if file.languages else "Unknown"),
             "💎 <b>Quality</b>  •  " + safe_html(file.quality or "Unknown"),
             "━━━━━━━━━━━━━━━━━━",
-            "🔐 Protected delivery • kept permanently in your private chat.",
+            "🔓 Save or forward now • this bot-chat copy expires in 5 minutes.",
         ]
     )
     return "\n".join(lines)

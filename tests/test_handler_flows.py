@@ -6,6 +6,7 @@ from app.handlers.search import content_callback, episode_callback, plain_title_
 from app.main import _write_repair_cards
 from app.metadata import parse_metadata
 from app.models import CatalogState, CategoryMode, MediaType, UsersState
+from app.panels import PanelManager
 from app.repositories import CatalogRepairResult, CatalogRepository, UserRepository
 from app.services import CatalogQueryService, SearchSessionStore
 from app.storage import MemorySnapshotBackend, StateStore
@@ -13,14 +14,26 @@ from app.storage import MemorySnapshotBackend, StateStore
 
 class FakeBot:
     def __init__(self):
+        self.next_message_id = 100
         self.sent_messages = []
         self.copied_messages = []
+        self.deleted_messages = []
 
     async def send_message(self, chat_id, text, **kwargs):
         self.sent_messages.append((chat_id, text, kwargs))
+        message = SimpleNamespace(message_id=self.next_message_id)
+        self.next_message_id += 1
+        return message
 
     async def copy_message(self, **kwargs):
         self.copied_messages.append(kwargs)
+        message = SimpleNamespace(message_id=self.next_message_id)
+        self.next_message_id += 1
+        return message
+
+    async def delete_message(self, chat_id, message_id):
+        self.deleted_messages.append((chat_id, message_id))
+        return True
 
 
 class FakePrivateMessage:
@@ -28,6 +41,7 @@ class FakePrivateMessage:
         self.chat = SimpleNamespace(type="private")
         self.from_user = user
         self.text = text
+        self.message_id = 700
         self.answers = []
         self.edits = []
 
@@ -69,7 +83,6 @@ def _config():
         host="0.0.0.0",
         port=8080,
         log_level="INFO",
-        protect_delivered_content=True,
     )
 
 
@@ -109,7 +122,8 @@ async def test_plain_search_to_episode_delivery_flow():
     assert "Season 1" in str(screen.edits[-1][1]["reply_markup"])
 
     episode = FakeCallback(user, f"ep:{content.id}:1:1:0:0", screen)
-    await episode_callback(episode, bot, catalog, query, users, _config())
+    panels = PanelManager(bot, users)
+    await episode_callback(episode, bot, catalog, query, users, _config(), panels)
     assert bot.copied_messages == [
         {
             "chat_id": 42,
@@ -117,20 +131,26 @@ async def test_plain_search_to_episode_delivery_flow():
             "message_id": 55,
             "caption": (
                 "📺 <b>Dark</b>\n"
-                "<blockquote>Series collection • protected delivery</blockquote>\n"
+                "<blockquote>Series collection • temporary delivery</blockquote>\n"
                 "━━━━━━━━━━━━━━━━━━\n"
                 "▶️ <b>Episode</b>  •  Season 1, Episode 1\n"
                 "📅 <b>Year</b>  •  Unknown\n"
                 "🗣 <b>Language</b>  •  Hindi\n"
                 "💎 <b>Quality</b>  •  1080p\n"
                 "━━━━━━━━━━━━━━━━━━\n"
-                "🔐 Protected delivery • kept permanently in your private chat."
+                "🔓 Save or forward now • this bot-chat copy expires in 5 minutes."
             ),
             "parse_mode": "HTML",
-            "protect_content": True,
+            "protect_content": False,
         }
     ]
+    assert "SAVE WITHIN 5 MINUTES" in bot.sent_messages[-1][1]
+    profile = users.get_user(42)
+    assert [
+        (item.media_message_id, item.notice_message_id) for item in profile.temporary_deliveries
+    ] == [(100, 101)]
     assert catalog.get_file(record.id).available is True
+    await panels.shutdown()
 
 
 async def test_channel_post_indexing_uses_allowlisted_metadata_only():

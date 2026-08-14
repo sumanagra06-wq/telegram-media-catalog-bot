@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot
@@ -17,6 +18,7 @@ from aiogram.exceptions import (
 )
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, TelegramObject
 
+from .models import TemporaryDeliveryRef
 from .repositories import UserRepository
 from .storage import StorageError
 
@@ -37,7 +39,7 @@ def _message_is_unavailable(exc: TelegramBadRequest) -> bool:
 
 
 class PanelManager:
-    """Owns each user's one pinned dashboard and one temporary workspace."""
+    """Owns the pinned dashboard, workspace, and restart-safe temporary deliveries."""
 
     def __init__(
         self,
@@ -45,11 +47,16 @@ class PanelManager:
         users: UserRepository,
         *,
         expiry_seconds: float = 300,
+        delivery_expiry_seconds: float = 300,
+        delivery_retry_seconds: float = 60,
     ) -> None:
         self.bot = bot
         self.users = users
         self.expiry_seconds = expiry_seconds
+        self.delivery_expiry_seconds = delivery_expiry_seconds
+        self.delivery_retry_seconds = delivery_retry_seconds
         self._expiry_tasks: dict[int, asyncio.Task[None]] = {}
+        self._delivery_expiry_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
         self._user_locks: dict[int, asyncio.Lock] = {}
         self._delivery_locks: dict[int, asyncio.Lock] = {}
 
@@ -57,8 +64,11 @@ class PanelManager:
         return self._user_locks.setdefault(user_id, asyncio.Lock())
 
     def delivery_lock(self, user_id: int) -> asyncio.Lock:
-        """Serialize each user's protected copy and dashboard replacement sequence."""
+        """Serialize each user's file delivery and temporary-UI cleanup sequence."""
         return self._delivery_locks.setdefault(user_id, asyncio.Lock())
+
+    def pending_temporary_delivery_count(self) -> int:
+        return len(self.users.list_temporary_deliveries())
 
     def pending_delivery_topic_count(self) -> int:
         return sum(
@@ -472,6 +482,251 @@ class PanelManager:
             if self._expiry_tasks.get(user_id) is current_task:
                 self._expiry_tasks.pop(user_id, None)
 
+    @staticmethod
+    def _delivery_expiry_delay(expires_at: str) -> float:
+        try:
+            expiry = datetime.fromisoformat(expires_at)
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=UTC)
+        except ValueError:
+            LOGGER.warning("Invalid temporary-delivery expiry %r; expiring immediately", expires_at)
+            return 0
+        return max((expiry - datetime.now(UTC)).total_seconds(), 0)
+
+    async def _delete_delivery_message(self, user_id: int, message_id: int) -> bool:
+        unavailable_markers = (
+            "message to delete not found",
+            "message not found",
+            "message_id_invalid",
+            "message identifier is not specified",
+        )
+        for attempt in range(3):
+            try:
+                await self.bot.delete_message(user_id, message_id)
+                return True
+            except TelegramRetryAfter as exc:
+                if attempt == 2:
+                    return False
+                delay = max(float(exc.retry_after), 0.1) + 0.1
+            except (TelegramNetworkError, TelegramServerError):
+                if attempt == 2:
+                    return False
+                delay = 0.25 * (2**attempt)
+            except TelegramBadRequest as exc:
+                return any(marker in str(exc).casefold() for marker in unavailable_markers)
+            except TelegramAPIError:
+                return False
+            LOGGER.warning(
+                "Transient failure deleting temporary message %s for user %s; retrying (%s/3)",
+                message_id,
+                user_id,
+                attempt + 2,
+            )
+            await asyncio.sleep(delay)
+        return False
+
+    def _schedule_temporary_delivery(
+        self,
+        user_id: int,
+        delivery: TemporaryDeliveryRef,
+    ) -> bool:
+        key = (user_id, delivery.media_message_id)
+        existing = self._delivery_expiry_tasks.get(key)
+        if existing is not None and not existing.done():
+            return False
+        self._delivery_expiry_tasks[key] = asyncio.create_task(
+            self._expire_temporary_delivery(user_id, delivery)
+        )
+        return True
+
+    def delivery_expires_at(self, expiry_seconds: float | None = None) -> str:
+        lifetime = self.delivery_expiry_seconds if expiry_seconds is None else expiry_seconds
+        return (datetime.now(UTC) + timedelta(seconds=lifetime)).isoformat(timespec="milliseconds")
+
+    async def register_temporary_delivery(
+        self,
+        *,
+        user_id: int,
+        media_message_id: int,
+        notice_message_id: int | None,
+        expiry_seconds: float | None = None,
+        expires_at: str | None = None,
+    ) -> TemporaryDeliveryRef:
+        if expires_at is None:
+            expires_at = self.delivery_expires_at(expiry_seconds)
+        delivery = TemporaryDeliveryRef(
+            media_message_id=media_message_id,
+            notice_message_id=notice_message_id,
+            expires_at=expires_at,
+        )
+        try:
+            stored = await self.users.add_temporary_delivery(user_id, delivery)
+        except (StorageError, ValueError):
+            # A delivery that cannot be durably scheduled must not remain in the user's chat.
+            await self.discard_delivery_messages(
+                user_id=user_id,
+                media_message_id=media_message_id,
+                notice_message_id=notice_message_id,
+            )
+            raise
+        self._schedule_temporary_delivery(user_id, stored)
+        return stored
+
+    async def attach_temporary_delivery_notice(
+        self,
+        *,
+        user_id: int,
+        media_message_id: int,
+        notice_message_id: int,
+    ) -> TemporaryDeliveryRef:
+        stored = await self.users.attach_temporary_delivery_notice(
+            user_id,
+            media_message_id,
+            notice_message_id,
+        )
+        key = (user_id, media_message_id)
+        previous = self._delivery_expiry_tasks.pop(key, None)
+        self._schedule_temporary_delivery(user_id, stored)
+        if previous is not None:
+            previous.cancel()
+        return stored
+
+    async def discard_registered_temporary_delivery(
+        self,
+        *,
+        user_id: int,
+        media_message_id: int,
+        notice_message_id: int | None = None,
+    ) -> bool:
+        profile = self.users.get_user(user_id)
+        delivery = (
+            next(
+                (
+                    item
+                    for item in profile.temporary_deliveries
+                    if item.media_message_id == media_message_id
+                ),
+                None,
+            )
+            if profile is not None
+            else None
+        )
+        if delivery is None:
+            return False
+        target_notice_id = (
+            notice_message_id if notice_message_id is not None else delivery.notice_message_id
+        )
+        deleted = await self.discard_delivery_messages(
+            user_id=user_id,
+            media_message_id=media_message_id,
+            notice_message_id=target_notice_id,
+        )
+        if not deleted:
+            return False
+        try:
+            cleared = await self.users.remove_temporary_delivery(
+                user_id,
+                media_message_id,
+                expected_notice_message_id=delivery.notice_message_id,
+                match_notice=True,
+            )
+            if not cleared:
+                LOGGER.warning(
+                    "Temporary delivery %s for user %s changed during cleanup; retaining its "
+                    "durable reference",
+                    media_message_id,
+                    user_id,
+                )
+                return False
+        except StorageError:
+            # The existing task/reference remains and safely retries already-missing messages.
+            LOGGER.exception(
+                "Temporary delivery %s for user %s was deleted but its reference could not be "
+                "cleared",
+                media_message_id,
+                user_id,
+            )
+        return True
+
+    async def discard_delivery_messages(
+        self,
+        *,
+        user_id: int,
+        media_message_id: int,
+        notice_message_id: int | None,
+    ) -> bool:
+        notice_deleted = notice_message_id is None or await self._delete_delivery_message(
+            user_id,
+            notice_message_id,
+        )
+        media_deleted = await self._delete_delivery_message(user_id, media_message_id)
+        return notice_deleted and media_deleted
+
+    async def recover_temporary_deliveries(self) -> int:
+        deliveries = self.users.list_temporary_deliveries()
+        for user_id, delivery in deliveries:
+            self._schedule_temporary_delivery(user_id, delivery)
+        return len(deliveries)
+
+    async def _expire_temporary_delivery(
+        self,
+        user_id: int,
+        delivery: TemporaryDeliveryRef,
+    ) -> None:
+        key = (user_id, delivery.media_message_id)
+        current_task = asyncio.current_task()
+        delay = self._delivery_expiry_delay(delivery.expires_at)
+        try:
+            while True:
+                await asyncio.sleep(delay)
+                current = self.users.get_user(user_id)
+                persisted = (
+                    next(
+                        (
+                            item
+                            for item in current.temporary_deliveries
+                            if item.media_message_id == delivery.media_message_id
+                            and item.notice_message_id == delivery.notice_message_id
+                        ),
+                        None,
+                    )
+                    if current is not None
+                    else None
+                )
+                if persisted is None:
+                    return
+                deleted = await self.discard_delivery_messages(
+                    user_id=user_id,
+                    media_message_id=delivery.media_message_id,
+                    notice_message_id=delivery.notice_message_id,
+                )
+                if deleted:
+                    try:
+                        await self.users.remove_temporary_delivery(
+                            user_id,
+                            delivery.media_message_id,
+                            expected_notice_message_id=delivery.notice_message_id,
+                            match_notice=True,
+                        )
+                        return
+                    except StorageError:
+                        LOGGER.exception(
+                            "Deleted temporary delivery %s for user %s but could not clear its "
+                            "durable reference; retrying",
+                            delivery.media_message_id,
+                            user_id,
+                        )
+                else:
+                    LOGGER.warning(
+                        "Could not fully delete temporary delivery %s for user %s; retrying",
+                        delivery.media_message_id,
+                        user_id,
+                    )
+                delay = self.delivery_retry_seconds
+        finally:
+            if self._delivery_expiry_tasks.get(key) is current_task:
+                self._delivery_expiry_tasks.pop(key, None)
+
     async def close_workspace(self, user_id: int, message_id: int) -> bool:
         task = self._expiry_tasks.pop(user_id, None)
         if task is not None:
@@ -533,8 +788,9 @@ class PanelManager:
         return await self.users.clear_all_panel_workspace_messages()
 
     async def shutdown(self) -> None:
-        tasks = tuple(self._expiry_tasks.values())
+        tasks = tuple(self._expiry_tasks.values()) + tuple(self._delivery_expiry_tasks.values())
         self._expiry_tasks.clear()
+        self._delivery_expiry_tasks.clear()
         for task in tasks:
             task.cancel()
         if tasks:

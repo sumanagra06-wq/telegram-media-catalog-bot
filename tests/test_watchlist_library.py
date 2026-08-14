@@ -90,7 +90,6 @@ def _config():
         host="0.0.0.0",
         port=8080,
         log_level="INFO",
-        protect_delivered_content=True,
     )
 
 

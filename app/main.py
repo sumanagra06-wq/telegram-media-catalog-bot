@@ -136,6 +136,12 @@ def create_application(config: Config) -> web.Application:
         await users_store.initialize()
         await catalog.migrate_schema()
         await users.migrate_schema()
+        recovered_deliveries = await panels.recover_temporary_deliveries()
+        if recovered_deliveries:
+            LOGGER.warning(
+                "Recovered %s temporary file deliveries for restart-safe expiry",
+                recovered_deliveries,
+            )
         retired_topics, failed_topics = await panels.cleanup_delivery_topics()
         if retired_topics:
             LOGGER.warning(
@@ -207,7 +213,9 @@ def create_application(config: Config) -> web.Application:
                 "catalog_snapshot_limit_bytes": MAX_COMPRESSED_SNAPSHOT_BYTES,
                 "users_revision": users.snapshot().revision,
                 "threaded_mode_enabled": runtime_status["threaded_mode_enabled"],
-                "delivery_mode": "flat_chat",
+                "delivery_mode": "flat_chat_temporary",
+                "delivery_expiry_seconds": panels.delivery_expiry_seconds,
+                "pending_temporary_deliveries": panels.pending_temporary_delivery_count(),
                 "pending_legacy_topics": panels.pending_delivery_topic_count(),
                 "pending_catalog_ingest": ingest_batcher.pending_count(),
             }

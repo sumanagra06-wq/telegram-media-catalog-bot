@@ -153,7 +153,6 @@ def _config():
         host="0.0.0.0",
         port=8080,
         log_level="INFO",
-        protect_delivered_content=True,
     )
 
 
@@ -429,7 +428,7 @@ async def test_schema_migration_rekeys_legacy_watchlist_entries_once():
     assert migrated.delivery_topic_id is None
     assert migrated.delivery_topics == {}
     assert "panel_workspace_is_receipt" not in migrated.model_dump(mode="json")
-    assert users.snapshot().schema_version == 7
+    assert users.snapshot().schema_version == 8
     assert len(migrated.watchlist) == 1
     entry_id, entry = next(iter(migrated.watchlist.items()))
     assert entry_id == entry.id
