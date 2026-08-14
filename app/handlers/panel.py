@@ -264,9 +264,9 @@ async def panel_help_callback(
         f"{DIVIDER}\n"
         "<b>1.</b> 🔎 Send a title or use Search\n"
         "<b>2.</b> 🎯 Open the matching title and choose its file\n"
-        "<b>3.</b> 📦 Receive protected media in the Deliveries topic\n"
+        "<b>3.</b> 🗂 Receive media in its Movies, Series, or dynamic category topic\n"
         "<b>4.</b> 📚 Use Watchlist—not Search—to save titles\n\n"
-        "🧹 Search messages and completed workspaces are automatically cleaned.\n"
+        "🧹 General keeps one reusable latest-delivery receipt instead of card clutter.\n"
         "⏱ Every workspace interaction restarts its 5-minute timer.",
         builder.as_markup(),
     )

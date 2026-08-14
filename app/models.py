@@ -152,6 +152,11 @@ class WatchlistEntry(BaseModel):
     updated_at: str = Field(default_factory=utcnow_iso)
 
 
+class DeliveryTopicRef(BaseModel):
+    message_thread_id: int
+    name: str
+
+
 class UserProfile(BaseModel):
     telegram_user_id: int
     first_name: str
@@ -164,14 +169,16 @@ class UserProfile(BaseModel):
     watchlist: dict[str, WatchlistEntry] = Field(default_factory=dict)
     panel_dashboard_message_id: int | None = None
     panel_workspace_message_id: int | None = None
+    panel_workspace_is_receipt: bool = False
     delivery_topic_id: int | None = None
+    delivery_topics: dict[str, DeliveryTopicRef] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utcnow_iso)
     updated_at: str = Field(default_factory=utcnow_iso)
     last_seen_at: str = Field(default_factory=utcnow_iso)
 
 
 class UsersState(VersionedState):
-    schema_version: int = 5
+    schema_version: int = 6
     kind: str = "users"
     access_mode: AccessMode = AccessMode.PUBLIC
     users: dict[str, UserProfile] = Field(default_factory=dict)

@@ -14,7 +14,14 @@ from app.handlers.panel import (
 )
 from app.handlers.search import file_callback, plain_title_search
 from app.metadata import parse_metadata
-from app.models import CatalogState, MediaType, UsersState, WatchStatus
+from app.models import (
+    CatalogState,
+    CategoryMode,
+    DeliveryTopicRef,
+    MediaType,
+    UsersState,
+    WatchStatus,
+)
 from app.panels import PanelManager
 from app.repositories import CatalogRepository, UserRepository
 from app.services import CatalogQueryService, SearchSessionStore
@@ -39,6 +46,7 @@ class FakePanelBot:
         self.next_topic_id = 900
         self.created_topics = []
         self.reopened_topics = []
+        self.edited_topics = []
         self.deleted_topics = []
         self.invalid_topic_ids = set()
         self.copy_fail_once_topic_ids = set()
@@ -70,6 +78,10 @@ class FakePanelBot:
                 message="Bad Request: message thread not found",
             )
         self.reopened_topics.append((chat_id, message_thread_id))
+        return True
+
+    async def edit_forum_topic(self, chat_id, message_thread_id, **kwargs):
+        self.edited_topics.append((chat_id, message_thread_id, kwargs))
         return True
 
     async def delete_forum_topic(self, chat_id, message_thread_id):
@@ -221,8 +233,27 @@ async def _register(users, user_id=42):
     )
 
 
+TOPIC_KWARGS = {
+    "category_id": "cat_movies",
+    "topic_name": "🎬 Movies",
+    "icon_color": 7_322_096,
+}
+
+
+async def _set_legacy_delivery_topic(users, topic_id):
+    def mutate(state):
+        state.users["42"].delivery_topic_id = topic_id
+
+    await users.store.mutate(mutate)
+
+
 async def _seed_movie(catalog, *, media_type=MediaType.VIDEO):
-    category = await catalog.add_category("Movies", -10010, "Movies")
+    category = await catalog.add_category(
+        "Movies",
+        -10010,
+        "Movies",
+        mode=CategoryMode.SINGLE,
+    )
     record, _, _ = await catalog.upsert_file(
         category_id=category.id,
         source_chat_id=-10010,
@@ -336,31 +367,73 @@ async def test_delivery_topic_is_created_persisted_and_reused():
     bot = FakePanelBot()
     panels = PanelManager(bot, users)
 
-    first = await panels.ensure_delivery_topic(42)
-    second = await panels.ensure_delivery_topic(42)
+    first = await panels.ensure_delivery_topic(42, **TOPIC_KWARGS)
+    second = await panels.ensure_delivery_topic(42, **TOPIC_KWARGS)
 
     assert first == second == 900
-    assert users.get_user(42).delivery_topic_id == 900
-    assert bot.created_topics == [(42, "📦 Deliveries", {"icon_color": 7_322_096}, 900)]
+    topic = users.get_user(42).delivery_topics["cat_movies"]
+    assert topic == DeliveryTopicRef(message_thread_id=900, name="🎬 Movies")
+    assert bot.created_topics == [(42, "🎬 Movies", {"icon_color": 7_322_096}, 900)]
     assert bot.reopened_topics == []
     assert len(bot.sent) == 1
     assert bot.sent[0][2]["message_thread_id"] == 900
     assert "never removed" in bot.sent[0][1]
 
 
+async def test_dynamic_category_topic_name_is_refreshed_without_replacement():
+    _, users = await _repositories()
+    await _register(users)
+    await users.set_category_delivery_topic(
+        42,
+        "cat_movies",
+        DeliveryTopicRef(message_thread_id=899, name="🎬 Films"),
+    )
+    bot = FakePanelBot()
+    panels = PanelManager(bot, users)
+
+    topic_id = await panels.ensure_delivery_topic(42, **TOPIC_KWARGS)
+
+    assert topic_id == 899
+    assert bot.created_topics == []
+    assert bot.edited_topics == [(42, 899, {"name": "🎬 Movies"})]
+    assert users.get_user(42).delivery_topics["cat_movies"].name == "🎬 Movies"
+
+
+async def test_legacy_delivery_topic_is_archived_when_first_category_topic_is_created():
+    _, users = await _repositories()
+    await _register(users)
+    await _set_legacy_delivery_topic(users, 899)
+    bot = FakePanelBot()
+    panels = PanelManager(bot, users)
+
+    created = await panels.ensure_delivery_topic(42, **TOPIC_KWARGS)
+
+    profile = users.get_user(42)
+    assert created == 900
+    assert profile.delivery_topic_id is None
+    assert profile.delivery_topics["cat_movies"].message_thread_id == 900
+    assert bot.edited_topics == [(42, 899, {"name": "🗃 Previous Deliveries"})]
+    assert bot.deleted_topics == []
+
+
 async def test_deleted_delivery_topic_is_replaced_without_deleting_old_content():
     _, users = await _repositories()
     await _register(users)
-    await users.set_delivery_topic(42, 899)
+    await users.set_category_delivery_topic(
+        42,
+        "cat_movies",
+        DeliveryTopicRef(message_thread_id=899, name="🎬 Movies"),
+    )
     bot = FakePanelBot()
     bot.invalid_topic_ids.add(899)
     panels = PanelManager(bot, users)
 
-    replacement = await panels.ensure_delivery_topic(42, replace=True)
+    replacement = await panels.ensure_delivery_topic(42, replace=True, **TOPIC_KWARGS)
 
     assert replacement == 900
-    assert users.get_user(42).delivery_topic_id == 900
-    assert bot.created_topics == [(42, "📦 Deliveries", {"icon_color": 7_322_096}, 900)]
+    topic = users.get_user(42).delivery_topics["cat_movies"]
+    assert topic.message_thread_id == 900
+    assert bot.created_topics == [(42, "🎬 Movies", {"icon_color": 7_322_096}, 900)]
     assert bot.deleted_topics == []
 
 
@@ -374,9 +447,9 @@ async def test_new_empty_delivery_topic_is_deleted_if_persistence_fails():
     panels = PanelManager(bot, users)
 
     with pytest.raises(StorageError):
-        await panels.ensure_delivery_topic(42)
+        await panels.ensure_delivery_topic(42, **TOPIC_KWARGS)
 
-    assert users.get_user(42).delivery_topic_id is None
+    assert users.get_user(42).delivery_topics == {}
     assert bot.deleted_topics == [(42, 900)]
     assert bot.sent == []
 
@@ -388,8 +461,8 @@ async def test_delivery_topic_unavailable_when_threaded_mode_is_disabled():
     bot.topics_enabled = False
     panels = PanelManager(bot, users)
 
-    assert await panels.ensure_delivery_topic(42) is None
-    assert users.get_user(42).delivery_topic_id is None
+    assert await panels.ensure_delivery_topic(42, **TOPIC_KWARGS) is None
+    assert users.get_user(42).delivery_topics == {}
     assert bot.created_topics == []
 
 
@@ -426,11 +499,50 @@ async def test_workspace_reuses_one_message_and_sliding_expiry_deletes_it():
     await panels.shutdown()
 
 
-async def test_successful_delivery_uses_permanent_topic_and_closes_workspace():
+async def test_latest_delivery_receipt_survives_timeout_and_restart_cleanup_until_reused():
+    _, users = await _repositories()
+    await _register(users)
+    bot = FakePanelBot()
+    panels = PanelManager(bot, users, expiry_seconds=0.05)
+    _, markup = panel_dashboard(False)
+
+    message_id = await panels.render_workspace(
+        user_id=42,
+        text="Interactive results",
+        reply_markup=markup,
+    )
+    receipt_id = await panels.render_delivery_receipt(
+        user_id=42,
+        text="Latest delivery receipt",
+        reply_markup=markup,
+    )
+    await asyncio.sleep(0.08)
+
+    profile = users.get_user(42)
+    assert receipt_id == message_id == 100
+    assert profile.panel_workspace_message_id == 100
+    assert profile.panel_workspace_is_receipt is True
+    assert bot.deleted == []
+    assert await panels.cleanup_stale_workspaces() == 0
+    assert users.get_user(42).panel_workspace_message_id == 100
+
+    await panels.render_workspace(
+        user_id=42,
+        text="New interactive search",
+        reply_markup=markup,
+    )
+    assert users.get_user(42).panel_workspace_is_receipt is False
+    await asyncio.sleep(0.08)
+    assert users.get_user(42).panel_workspace_message_id is None
+    assert bot.deleted == [(42, 100)]
+    await panels.shutdown()
+
+
+async def test_successful_delivery_uses_category_topic_and_reuses_workspace_as_receipt():
     catalog, users = await _repositories()
     await _register(users)
     await users.set_panel_dashboard_message(42, 50)
-    category = await catalog.add_category("Movies", -10010, "Movies")
+    category = await catalog.add_category("Movies", -10010, "Movies", mode=CategoryMode.SINGLE)
     record, _, _ = await catalog.upsert_file(
         category_id=category.id,
         source_chat_id=-10010,
@@ -463,14 +575,74 @@ async def test_successful_delivery_uses_permanent_topic_and_closes_workspace():
     profile = users.get_user(42)
     assert users.snapshot().revision == revision_before_delivery + 2
     assert bot.events == [("send", 100), ("send", 101), ("copy", 102)]
-    assert bot.created_topics == [(42, "📦 Deliveries", {"icon_color": 7_322_096}, 900)]
+    assert bot.created_topics == [(42, "🎬 Movies", {"icon_color": 7_322_096}, 900)]
     assert bot.copied[-1]["message_thread_id"] == 900
-    assert profile.delivery_topic_id == 900
+    assert profile.delivery_topics[category.id].message_thread_id == 900
     assert profile.panel_dashboard_message_id == 50
-    assert profile.panel_workspace_message_id is None
-    assert bot.deleted == [(42, 100)]
+    assert profile.panel_workspace_message_id == 100
+    assert profile.panel_workspace_is_receipt is True
+    assert bot.deleted == []
     assert (42, 102) not in bot.deleted
-    assert "DELIVERY INBOX" in bot.sent[-1][1]
+    assert "DELIVERY ARCHIVE" in bot.sent[-1][1]
+    assert "DELIVERY READY" in bot.edited[-1][2]
+    assert "🎬 Movies" in bot.edited[-1][2]
+    await panels.shutdown()
+
+
+async def test_movies_and_series_route_to_separate_dynamic_category_topics():
+    catalog, users = await _repositories()
+    await _register(users)
+    movie = await _seed_movie(catalog)
+    series_category = await catalog.add_category(
+        "Series",
+        -10020,
+        "Series",
+        mode=CategoryMode.EPISODIC,
+    )
+    episode, _, _ = await catalog.upsert_file(
+        category_id=series_category.id,
+        source_chat_id=-10020,
+        source_message_id=2,
+        telegram_file_id="series-file",
+        telegram_file_unique_id="series-unique",
+        media_type=MediaType.VIDEO,
+        metadata=parse_metadata("Dark S01E01 1080p Hindi mkv"),
+    )
+    bot = FakePanelBot()
+    panels = PanelManager(bot, users)
+
+    await file_callback(
+        FakeCallback(_user(), f"fl:{movie.id}", 77),
+        bot,
+        catalog,
+        users,
+        _config(),
+        panels,
+    )
+    receipt_id = users.get_user(42).panel_workspace_message_id
+    await file_callback(
+        FakeCallback(_user(), f"fl:{episode.id}", receipt_id),
+        bot,
+        catalog,
+        users,
+        _config(),
+        panels,
+    )
+
+    profile = users.get_user(42)
+    assert [(name, kwargs["icon_color"]) for _, name, kwargs, _ in bot.created_topics] == [
+        ("🎬 Movies", 7_322_096),
+        ("📺 Series", 9_367_192),
+    ]
+    assert profile.delivery_topics[movie.category_id].message_thread_id == 900
+    assert profile.delivery_topics[episode.category_id].message_thread_id == 901
+    assert [copy["message_thread_id"] for copy in bot.copied] == [900, 901]
+    assert all("reply_markup" not in copy for copy in bot.copied)
+    assert "Movies collection • protected delivery" in bot.copied[0]["caption"]
+    assert "Series collection • protected delivery" in bot.copied[1]["caption"]
+    assert profile.panel_workspace_message_id == receipt_id == 102
+    assert profile.panel_workspace_is_receipt is True
+    assert "📺 Series" in bot.edited[-1][2]
     await panels.shutdown()
 
 
@@ -487,8 +659,11 @@ async def test_missing_source_post_uses_document_file_id_inside_delivery_topic()
 
     assert bot.sent_documents[-1]["document"] == "file-1"
     assert bot.sent_documents[-1]["message_thread_id"] == 900
-    delivered_id = bot.events[-1][1]
+    delivered_id = next(message_id for event, message_id in bot.events if event == "document")
+    profile = users.get_user(42)
     assert catalog.get_file(record.id).available is True
+    assert profile.panel_workspace_message_id == 102
+    assert profile.panel_workspace_is_receipt is True
     assert bot.deleted == [(42, 77)]
     assert (42, delivered_id) not in bot.deleted
 
@@ -497,7 +672,11 @@ async def test_closed_delivery_topic_is_reopened_before_retry():
     catalog, users = await _repositories()
     await _register(users)
     record = await _seed_movie(catalog)
-    await users.set_delivery_topic(42, 899)
+    await users.set_category_delivery_topic(
+        42,
+        record.category_id,
+        DeliveryTopicRef(message_thread_id=899, name="🎬 Movies"),
+    )
     bot = FakePanelBot()
     bot.copy_closed_once_topic_ids.add(899)
     panels = PanelManager(bot, users)
@@ -507,7 +686,8 @@ async def test_closed_delivery_topic_is_reopened_before_retry():
 
     assert bot.reopened_topics == [(42, 899)]
     assert bot.copied[-1]["message_thread_id"] == 899
-    delivered_id = bot.events[-1][1]
+    delivered_id = next(message_id for event, message_id in bot.events if event == "copy")
+    assert users.get_user(42).panel_workspace_is_receipt is True
     assert bot.deleted == [(42, 77)]
     assert (42, delivered_id) not in bot.deleted
 
@@ -516,7 +696,11 @@ async def test_invalid_delivery_topic_is_replaced_and_delivery_retried():
     catalog, users = await _repositories()
     await _register(users)
     record = await _seed_movie(catalog)
-    await users.set_delivery_topic(42, 899)
+    await users.set_category_delivery_topic(
+        42,
+        record.category_id,
+        DeliveryTopicRef(message_thread_id=899, name="🎬 Movies"),
+    )
     bot = FakePanelBot()
     bot.copy_fail_once_topic_ids.add(899)
     panels = PanelManager(bot, users)
@@ -524,7 +708,7 @@ async def test_invalid_delivery_topic_is_replaced_and_delivery_retried():
 
     await file_callback(callback, bot, catalog, users, _config(), panels)
 
-    assert users.get_user(42).delivery_topic_id == 900
+    assert users.get_user(42).delivery_topics[record.category_id].message_thread_id == 900
     assert bot.created_topics[-1][-1] == 900
     assert bot.copied[-1]["message_thread_id"] == 900
     assert bot.deleted_topics == []
@@ -542,9 +726,11 @@ async def test_disabled_threaded_mode_falls_back_to_general_delivery():
 
     await file_callback(callback, bot, catalog, users, _config(), panels)
 
-    assert users.get_user(42).delivery_topic_id is None
+    assert users.get_user(42).delivery_topics == {}
     assert bot.created_topics == []
     assert bot.copied[-1]["message_thread_id"] is None
+    assert "General fallback" in bot.sent[-1][1]
+    assert users.get_user(42).panel_workspace_is_receipt is True
     assert bot.deleted == [(42, 77)]
 
 
@@ -561,7 +747,7 @@ async def test_topic_persistence_failure_falls_back_to_general_delivery():
 
     await file_callback(callback, bot, catalog, users, _config(), panels)
 
-    assert users.get_user(42).delivery_topic_id is None
+    assert users.get_user(42).delivery_topics == {}
     assert bot.deleted_topics == [(42, 900)]
     assert bot.copied[-1]["message_thread_id"] is None
     assert bot.deleted == [(42, 77)]
@@ -571,7 +757,11 @@ async def test_topic_replacement_failure_falls_back_to_general_delivery():
     catalog, users = await _repositories()
     await _register(users)
     record = await _seed_movie(catalog)
-    await users.set_delivery_topic(42, 899)
+    await users.set_category_delivery_topic(
+        42,
+        record.category_id,
+        DeliveryTopicRef(message_thread_id=899, name="🎬 Movies"),
+    )
     bot = FakePanelBot()
     bot.copy_fail_once_topic_ids.add(899)
     bot.invalidate_created_topics = True
@@ -580,9 +770,9 @@ async def test_topic_replacement_failure_falls_back_to_general_delivery():
 
     await file_callback(callback, bot, catalog, users, _config(), panels)
 
-    assert users.get_user(42).delivery_topic_id == 900
+    assert users.get_user(42).delivery_topics[record.category_id].message_thread_id == 900
     assert bot.copied[-1]["message_thread_id"] is None
-    delivered_id = bot.events[-1][1]
+    delivered_id = next(message_id for event, message_id in bot.events if event == "copy")
     assert bot.deleted == [(42, 77)]
     assert (42, delivered_id) not in bot.deleted
 
@@ -612,7 +802,8 @@ async def test_owner_dashboard_is_unified_and_discovery_has_no_watchlist_mutatio
     assert "p:admin" in owner_callbacks
     assert "p:admin" not in user_callbacks
     assert {"p:search", "p:browse", "p:recent", "p:watchlist"} <= owner_callbacks
-    assert "Deliveries topic" in owner_text
+    assert "category delivery topics" in owner_text
+    assert "latest receipt stays" in user_text
     assert "Watchlist additions stay inside" in user_text
     assert not any(
         callback and callback.startswith(("px:", "pa:", "pw:"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
@@ -9,13 +10,14 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from ..config import Config
 from ..guards import access_denied_text, can_use_bot, ensure_registered
-from ..models import FileRecord, MediaType
+from ..models import Category, CategoryMode, FileRecord, MediaType
 from ..panels import PanelManager
 from ..repositories import CatalogRepository, UserRepository
 from ..services import CatalogQueryService, SearchSessionStore, delivery_caption
 from ..storage import StorageError
 from ..ui import (
     content_screen,
+    delivery_receipt,
     no_results,
     pack_screen,
     search_results,
@@ -287,6 +289,31 @@ async def pack_callback(
     await edit_screen(callback, text, markup)
 
 
+@dataclass(frozen=True, slots=True)
+class DeliveryTopicSpec:
+    category_id: str
+    name: str
+    icon_color: int
+
+
+def _delivery_topic_spec(category: Category) -> DeliveryTopicSpec:
+    icons = {
+        CategoryMode.SINGLE: "🎬",
+        CategoryMode.EPISODIC: "📺",
+        CategoryMode.MIXED: "🗂",
+    }
+    colors = {
+        CategoryMode.SINGLE: 7_322_096,
+        CategoryMode.EPISODIC: 9_367_192,
+        CategoryMode.MIXED: 13_338_331,
+    }
+    return DeliveryTopicSpec(
+        category_id=category.id,
+        name=f"{icons[category.mode]} {category.name}"[:128],
+        icon_color=colors[category.mode],
+    )
+
+
 def _is_delivery_topic_error(exc: TelegramBadRequest) -> bool:
     detail = str(exc).casefold()
     return any(
@@ -309,13 +336,20 @@ def _is_delivery_topic_error(exc: TelegramBadRequest) -> bool:
 async def _ensure_delivery_target(
     panels: PanelManager | None,
     user_id: int,
+    spec: DeliveryTopicSpec,
     *,
     replace: bool = False,
 ) -> int | None:
     if panels is None:
         return None
     try:
-        return await panels.ensure_delivery_topic(user_id, replace=replace)
+        return await panels.ensure_delivery_topic(
+            user_id,
+            category_id=spec.category_id,
+            topic_name=spec.name,
+            icon_color=spec.icon_color,
+            replace=replace,
+        )
     except (StorageError, ValueError):
         LOGGER.exception(
             "Could not persist a delivery topic for user %s; using General",
@@ -329,12 +363,13 @@ async def _copy_to_delivery_topic(
     bot: Bot,
     panels: PanelManager | None,
     user_id: int,
+    spec: DeliveryTopicSpec,
     source_chat_id: int,
     source_message_id: int,
     caption: str,
     protect_content: bool,
 ) -> int | None:
-    topic_id = await _ensure_delivery_target(panels, user_id)
+    topic_id = await _ensure_delivery_target(panels, user_id, spec)
 
     async def copy(target_topic_id: int | None) -> None:
         await bot.copy_message(
@@ -364,7 +399,7 @@ async def _copy_to_delivery_topic(
                 if not _is_delivery_topic_error(reopened_exc):
                     raise
 
-        replacement_id = await _ensure_delivery_target(panels, user_id, replace=True)
+        replacement_id = await _ensure_delivery_target(panels, user_id, spec, replace=True)
         try:
             await copy(replacement_id)
             return replacement_id
@@ -382,6 +417,7 @@ async def _send_file_id_with_delivery_fallback(
     bot: Bot,
     panels: PanelManager | None,
     user_id: int,
+    spec: DeliveryTopicSpec,
     topic_id: int | None,
     record: FileRecord,
     caption: str,
@@ -424,7 +460,7 @@ async def _send_file_id_with_delivery_fallback(
                 if not _is_delivery_topic_error(reopened_exc):
                     raise
 
-        replacement_id = await _ensure_delivery_target(panels, user_id, replace=True)
+        replacement_id = await _ensure_delivery_target(panels, user_id, spec, replace=True)
         try:
             await send(replacement_id)
             return replacement_id
@@ -436,22 +472,37 @@ async def _send_file_id_with_delivery_fallback(
         return None
 
 
-async def _clean_after_delivery(
+async def _finish_delivery(
+    *,
     callback: CallbackQuery,
     bot: Bot,
     panels: PanelManager | None,
+    receipt_text: str,
+    receipt_markup: InlineKeyboardMarkup,
 ) -> None:
-    if callback.message is None:
-        return
-    message_id = getattr(callback.message, "message_id", None)
-    if message_id is None:
-        return
-    if panels and await panels.close_workspace(callback.from_user.id, message_id):
+    source_message_id = (
+        getattr(callback.message, "message_id", None) if callback.message is not None else None
+    )
+    receipt_message_id: int | None = None
+    if panels is not None:
+        try:
+            receipt_message_id = await panels.render_delivery_receipt(
+                user_id=callback.from_user.id,
+                text=receipt_text,
+                reply_markup=receipt_markup,
+            )
+        except (StorageError, ValueError, RuntimeError, TelegramAPIError):
+            LOGGER.warning(
+                "Delivery succeeded but the reusable receipt failed for user %s",
+                callback.from_user.id,
+                exc_info=True,
+            )
+    if source_message_id is None or source_message_id == receipt_message_id:
         return
     try:
-        await bot.delete_message(callback.from_user.id, message_id)
+        await bot.delete_message(callback.from_user.id, source_message_id)
     except TelegramAPIError:
-        LOGGER.info("Could not auto-clean delivery source card %s", message_id)
+        LOGGER.info("Could not auto-clean delivery source card %s", source_message_id)
 
 
 async def _deliver_file(
@@ -470,20 +521,40 @@ async def _deliver_file(
         )
         return
     content = catalog.get_content(record.content_id)
-    if content is None:
+    category = catalog.get_category(record.category_id)
+    if content is None or category is None:
         await callback.message.answer(
             "⚠️ <b>TITLE UNAVAILABLE</b>\nThis title is no longer in the delivery catalog."
         )
         return
-    delivery_topic_id: int | None = None
+
+    spec = _delivery_topic_spec(category)
+    caption = delivery_caption(record, content.kind, category.name)
+
+    async def finish(topic_id: int | None) -> None:
+        text, markup = delivery_receipt(
+            content,
+            record,
+            category,
+            spec.name if topic_id is not None else None,
+        )
+        await _finish_delivery(
+            callback=callback,
+            bot=bot,
+            panels=panels,
+            receipt_text=text,
+            receipt_markup=markup,
+        )
+
     try:
         delivery_topic_id = await _copy_to_delivery_topic(
             bot=bot,
             panels=panels,
             user_id=callback.from_user.id,
+            spec=spec,
             source_chat_id=record.source_chat_id,
             source_message_id=record.source_message_id,
-            caption=delivery_caption(record, content.kind),
+            caption=caption,
             protect_content=config.protect_delivered_content,
         )
     except TelegramForbiddenError:
@@ -502,18 +573,22 @@ async def _deliver_file(
         # Telegram file IDs provide a server-side fallback without downloading or re-uploading
         # the media through Railway.
         try:
-            if panels is not None:
-                delivery_topic_id = await _ensure_delivery_target(panels, callback.from_user.id)
-            await _send_file_id_with_delivery_fallback(
+            delivery_topic_id = await _ensure_delivery_target(
+                panels,
+                callback.from_user.id,
+                spec,
+            )
+            delivery_topic_id = await _send_file_id_with_delivery_fallback(
                 bot=bot,
                 panels=panels,
                 user_id=callback.from_user.id,
+                spec=spec,
                 topic_id=delivery_topic_id,
                 record=record,
-                caption=delivery_caption(record, content.kind),
+                caption=caption,
                 protect_content=config.protect_delivered_content,
             )
-            await _clean_after_delivery(callback, bot, panels)
+            await finish(delivery_topic_id)
             return
         except TelegramForbiddenError:
             # A blocked bot cannot deliver to either a topic or General; the file remains valid.
@@ -537,7 +612,7 @@ async def _deliver_file(
                 except (TelegramBadRequest, TelegramForbiddenError):
                     LOGGER.info("Could not notify owner %s about unavailable file", owner_id)
     else:
-        await _clean_after_delivery(callback, bot, panels)
+        await finish(delivery_topic_id)
 
 
 @router.callback_query(F.data.startswith("fl:"))

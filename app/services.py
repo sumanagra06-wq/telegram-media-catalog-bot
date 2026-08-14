@@ -222,12 +222,11 @@ def variant_label(file: FileRecord) -> str:
     return f"{language} • {quality}"
 
 
-def delivery_caption(file: FileRecord, kind: ContentKind) -> str:
+def delivery_caption(file: FileRecord, kind: ContentKind, category_name: str) -> str:
     icon = "📺" if kind == ContentKind.SERIES else "🎬"
-    kind_label = "Series delivery" if kind == ContentKind.SERIES else "Movie delivery"
     lines = [
         f"{icon} <b>{safe_html(file.title)}</b>",
-        f"<blockquote>{kind_label} • protected file</blockquote>",
+        f"<blockquote>{safe_html(category_name)} collection • protected delivery</blockquote>",
         "━━━━━━━━━━━━━━━━━━",
     ]
     if file.record_kind == RecordKind.EPISODE:
@@ -241,7 +240,7 @@ def delivery_caption(file: FileRecord, kind: ContentKind) -> str:
             + safe_html(", ".join(file.languages) if file.languages else "Unknown"),
             "💎 <b>Quality</b>  •  " + safe_html(file.quality or "Unknown"),
             "━━━━━━━━━━━━━━━━━━",
-            "🔐 Delivered with Telegram content protection.",
+            "🔐 Protected delivery • kept in your category archive.",
         ]
     )
     return "\n".join(lines)

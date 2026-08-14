@@ -14,6 +14,7 @@ from .models import (
     CategoryMode,
     ContentKind,
     ContentRecord,
+    DeliveryTopicRef,
     FileRecord,
     IndexFailure,
     MediaType,
@@ -723,7 +724,7 @@ class UserRepository:
         return self.store.snapshot()
 
     async def migrate_schema(self) -> bool:
-        needs_migration = self.store.state.schema_version < 5 or any(
+        needs_migration = self.store.state.schema_version < 6 or any(
             not entry.id or key != entry.id
             for user in self.store.state.users.values()
             for key, entry in user.watchlist.items()
@@ -749,7 +750,10 @@ class UserRepository:
                     changed = True
                 if changed:
                     user.updated_at = utcnow_iso()
-            state.schema_version = 5
+            for user in state.users.values():
+                if user.panel_workspace_message_id is None:
+                    user.panel_workspace_is_receipt = False
+            state.schema_version = 6
             return True
 
         return await self.store.mutate(mutate)
@@ -854,18 +858,29 @@ class UserRepository:
 
         return await self.store.mutate(mutate)
 
-    async def set_delivery_topic(self, user_id: int, topic_id: int | None) -> UserProfile:
+    async def set_category_delivery_topic(
+        self,
+        user_id: int,
+        category_id: str,
+        topic: DeliveryTopicRef,
+        *,
+        clear_legacy: bool = False,
+    ) -> UserProfile:
         current = self.store.state.users.get(str(user_id))
         if current is None:
             raise ValueError("User not found")
-        if current.delivery_topic_id == topic_id:
+        if current.delivery_topics.get(category_id) == topic and (
+            not clear_legacy or current.delivery_topic_id is None
+        ):
             return current.model_copy(deep=True)
 
         def mutate(state: UsersState) -> UserProfile:
             user = state.users.get(str(user_id))
             if user is None:
                 raise ValueError("User not found")
-            user.delivery_topic_id = topic_id
+            user.delivery_topics[category_id] = topic
+            if clear_legacy:
+                user.delivery_topic_id = None
             user.updated_at = utcnow_iso()
             return user.model_copy(deep=True)
 
@@ -892,7 +907,10 @@ class UserRepository:
         current = self.store.state.users.get(str(user_id))
         if current is None:
             raise ValueError("User not found")
-        if current.panel_workspace_message_id == message_id:
+        if (
+            current.panel_workspace_message_id == message_id
+            and not current.panel_workspace_is_receipt
+        ):
             return current.model_copy(deep=True)
 
         def mutate(state: UsersState) -> UserProfile:
@@ -900,25 +918,28 @@ class UserRepository:
             if user is None:
                 raise ValueError("User not found")
             user.panel_workspace_message_id = message_id
+            user.panel_workspace_is_receipt = False
             user.updated_at = utcnow_iso()
             return user.model_copy(deep=True)
 
         return await self.store.mutate(mutate)
 
-    async def replace_panel_workspace_message(
+    async def mark_panel_workspace_receipt(
         self,
         user_id: int,
         message_id: int,
-        *,
-        expected_previous_id: int | None,
     ) -> UserProfile:
+        current = self.store.state.users.get(str(user_id))
+        if current is None or current.panel_workspace_message_id != message_id:
+            raise ValueError("Workspace changed before receipt persistence")
+        if current.panel_workspace_is_receipt:
+            return current.model_copy(deep=True)
+
         def mutate(state: UsersState) -> UserProfile:
             user = state.users.get(str(user_id))
-            if user is None:
-                raise ValueError("User not found")
-            if user.panel_workspace_message_id != expected_previous_id:
-                raise ValueError("Workspace changed while it was being replaced")
-            user.panel_workspace_message_id = message_id
+            if user is None or user.panel_workspace_message_id != message_id:
+                raise ValueError("Workspace changed before receipt persistence")
+            user.panel_workspace_is_receipt = True
             user.updated_at = utcnow_iso()
             return user.model_copy(deep=True)
 
@@ -949,6 +970,7 @@ class UserRepository:
             ):
                 return False
             user.panel_workspace_message_id = None
+            user.panel_workspace_is_receipt = False
             user.updated_at = utcnow_iso()
             return True
 
@@ -956,7 +978,8 @@ class UserRepository:
 
     async def clear_all_panel_workspace_messages(self) -> int:
         if not any(
-            user.panel_workspace_message_id is not None for user in self.store.state.users.values()
+            user.panel_workspace_message_id is not None and not user.panel_workspace_is_receipt
+            for user in self.store.state.users.values()
         ):
             return 0
 
@@ -964,9 +987,10 @@ class UserRepository:
             cleared = 0
             now = utcnow_iso()
             for user in state.users.values():
-                if user.panel_workspace_message_id is None:
+                if user.panel_workspace_message_id is None or user.panel_workspace_is_receipt:
                     continue
                 user.panel_workspace_message_id = None
+                user.panel_workspace_is_receipt = False
                 user.updated_at = now
                 cleared += 1
             return cleared
