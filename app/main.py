@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 
@@ -215,6 +216,22 @@ def create_application(config: Config) -> web.Application:
         "threaded_mode_enabled": None,
         "movie_nobita_cleanup": {"status": "pending"},
     }
+    maintenance_task: asyncio.Task[None] | None = None
+
+    async def run_movie_cleanup() -> None:
+        runtime_status["movie_nobita_cleanup"] = {"status": "running"}
+        try:
+            runtime_status["movie_nobita_cleanup"] = await _purge_movie_nobita_doraemon(
+                bot,
+                config,
+                catalog,
+            )
+        except Exception as exc:
+            runtime_status["movie_nobita_cleanup"] = {
+                "status": "failed",
+                "error": type(exc).__name__,
+            }
+            LOGGER.exception("Movie-only Nobita/Doraemon cleanup failed")
 
     dispatcher.callback_query.outer_middleware(PanelActivityMiddleware())
     dispatcher.message.outer_middleware(PanelActivityMiddleware())
@@ -276,11 +293,8 @@ def create_application(config: Config) -> web.Application:
                 repair.merged_contents,
             )
             await _write_repair_cards(bot, config, catalog, repair)
-        runtime_status["movie_nobita_cleanup"] = await _purge_movie_nobita_doraemon(
-            bot,
-            config,
-            catalog,
-        )
+        nonlocal maintenance_task
+        maintenance_task = asyncio.create_task(run_movie_cleanup())
         await register_commands(bot, config)
         await bot.set_webhook(
             url=config.webhook_url,
@@ -306,6 +320,11 @@ def create_application(config: Config) -> web.Application:
         )
 
     async def on_shutdown() -> None:
+        nonlocal maintenance_task
+        if maintenance_task is not None:
+            maintenance_task.cancel()
+            await asyncio.gather(maintenance_task, return_exceptions=True)
+            maintenance_task = None
         await ingest_batcher.shutdown()
         await index_audit_batcher.shutdown()
         await panels.shutdown()
