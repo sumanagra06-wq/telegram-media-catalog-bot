@@ -215,12 +215,44 @@ def create_application(config: Config) -> web.Application:
 
     async def run_movie_cleanup() -> None:
         runtime_status["movie_nobita_cleanup"] = {"status": "running"}
+        totals = {
+            "categories": 0,
+            "titles_removed": 0,
+            "files_removed": 0,
+            "source_posts_deleted": 0,
+            "source_posts_pending": 0,
+        }
         try:
-            runtime_status["movie_nobita_cleanup"] = await _purge_movie_nobita_doraemon(
-                bot,
-                config,
-                catalog,
-            )
+            for cleanup_pass in range(1, 6):
+                result = await _purge_movie_nobita_doraemon(bot, config, catalog)
+                if result["status"] != "complete":
+                    runtime_status["movie_nobita_cleanup"] = result
+                    return
+                category_count = result["categories"]
+                if isinstance(category_count, int):
+                    totals["categories"] = max(totals["categories"], category_count)
+                for key in (
+                    "titles_removed",
+                    "files_removed",
+                    "source_posts_deleted",
+                    "source_posts_pending",
+                ):
+                    value = result[key]
+                    if isinstance(value, int):
+                        totals[key] += value
+                runtime_status["movie_nobita_cleanup"] = {
+                    "status": "verifying",
+                    "passes": cleanup_pass,
+                    **totals,
+                }
+                if result["titles_removed"] == 0 and ingest_batcher.pending_count() == 0:
+                    break
+                await asyncio.sleep(2)
+            runtime_status["movie_nobita_cleanup"] = {
+                "status": "complete",
+                "passes": cleanup_pass,
+                **totals,
+            }
         except Exception as exc:
             runtime_status["movie_nobita_cleanup"] = {
                 "status": "failed",
