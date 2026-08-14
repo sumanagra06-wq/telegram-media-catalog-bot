@@ -14,7 +14,7 @@ from .commands import register_commands
 from .config import Config, ConfigError
 from .handlers import admin, channel, common, panel, search, watchlist
 from .ingestion import CatalogIngestBatcher, IndexAuditBatcher
-from .models import CatalogState, UsersState
+from .models import CatalogState, RemovedSourceRecord, UsersState
 from .panels import PanelActivityMiddleware, PanelManager
 from .repositories import CatalogRepairResult, CatalogRepository, UserRepository
 from .services import CatalogQueryService, SearchSessionStore
@@ -24,7 +24,7 @@ from .storage import (
     StorageError,
     TelegramSnapshotBackend,
 )
-from .utils import safe_html
+from .utils import normalize_title, safe_html
 
 LOGGER = logging.getLogger(__name__)
 
@@ -92,6 +92,110 @@ async def _write_repair_cards(
             LOGGER.warning("Could not write corrected audit card for %s", file_id, exc_info=True)
 
 
+async def _purge_movie_nobita_doraemon(
+    bot: Bot,
+    config: Config,
+    catalog: CatalogRepository,
+) -> dict[str, object]:
+    """One-release maintenance: purge matching Movie/Movies titles, never Cartoon Movie."""
+
+    snapshot = catalog.snapshot()
+    target_categories = [
+        category
+        for category in snapshot.categories.values()
+        if normalize_title(category.name) in {"movie", "movies"}
+        or normalize_title(category.slug) in {"movie", "movies"}
+    ]
+    if not target_categories:
+        LOGGER.error(
+            "Movie/Nobita maintenance found no exact Movie or Movies category; available=%s",
+            sorted(category.name for category in snapshot.categories.values()),
+        )
+        return {
+            "status": "category_not_found",
+            "categories": 0,
+            "titles_removed": 0,
+            "files_removed": 0,
+            "source_posts_deleted": 0,
+            "source_posts_pending": 0,
+        }
+
+    target_category_ids = {category.id for category in target_categories}
+    target_source_chats = {
+        channel_id
+        for category in target_categories
+        for channel_id in (category.active_channel_id, *category.legacy_channel_ids)
+    }
+    title_terms = {"nobita", "doraemon", "doremon"}
+
+    matching_contents = sorted(
+        (
+            content
+            for content in snapshot.contents.values()
+            if content.category_id in target_category_ids
+            and title_terms.intersection(normalize_title(content.title).split())
+        ),
+        key=lambda content: (content.title.casefold(), content.id),
+    )
+    removed_titles: list[str] = []
+    removed_file_count = 0
+    source_candidates: dict[tuple[int, int], RemovedSourceRecord] = {
+        (source.source_chat_id, source.source_message_id): source
+        for source in catalog.pending_removed_sources()
+        if source.source_chat_id in target_source_chats
+        and title_terms.intersection(normalize_title(source.content_title).split())
+    }
+    actor_id = min(config.owner_ids)
+    for content in matching_contents:
+        try:
+            result = await catalog.remove_content(content.id, actor_id)
+        except ValueError:
+            # A retry or overlapping channel update may already have removed this exact title.
+            continue
+        removed_titles.append(result.content.title)
+        removed_file_count += len(result.files)
+        source_candidates.update(
+            {(source.source_chat_id, source.source_message_id): source for source in result.sources}
+        )
+
+    deleted, failed = await admin._delete_source_posts(
+        bot,
+        catalog,
+        list(source_candidates.values()),
+    )
+    status = {
+        "status": "complete",
+        "categories": len(target_categories),
+        "titles_removed": len(removed_titles),
+        "files_removed": removed_file_count,
+        "source_posts_deleted": deleted,
+        "source_posts_pending": failed,
+    }
+    LOGGER.warning(
+        "Completed Movie-only Nobita/Doraemon purge: %s; titles=%s; categories=%s",
+        status,
+        removed_titles,
+        [category.name for category in target_categories],
+    )
+    try:
+        await bot.send_message(
+            config.file_database_channel_id,
+            "🧹 <b>MOVIE CATEGORY CLEANUP COMPLETE</b>\n"
+            "<blockquote>Nobita + Doraemon/Doremon • Cartoon Movie excluded</blockquote>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"🎬 <b>Titles removed</b>  •  {len(removed_titles)}\n"
+            f"📦 <b>Files removed</b>  •  {removed_file_count}\n"
+            f"✅ <b>Source posts deleted</b>  •  {deleted}\n"
+            f"🕓 <b>Pending manual/retry deletion</b>  •  {failed}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "📚 Watchlists and every non-Movie category were left unchanged.",
+            disable_notification=True,
+        )
+    except Exception:
+        LOGGER.warning("Could not write Movie-category cleanup card", exc_info=True)
+    return status
+
+
 def create_application(config: Config) -> web.Application:
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = Dispatcher(storage=MemoryStorage())
@@ -107,7 +211,10 @@ def create_application(config: Config) -> web.Application:
     panels = PanelManager(bot, users)
     ingest_batcher = CatalogIngestBatcher(catalog)
     index_audit_batcher = IndexAuditBatcher(bot, config.file_database_channel_id)
-    runtime_status: dict[str, bool | None] = {"threaded_mode_enabled": None}
+    runtime_status: dict[str, object] = {
+        "threaded_mode_enabled": None,
+        "movie_nobita_cleanup": {"status": "pending"},
+    }
 
     dispatcher.callback_query.outer_middleware(PanelActivityMiddleware())
     dispatcher.message.outer_middleware(PanelActivityMiddleware())
@@ -169,6 +276,11 @@ def create_application(config: Config) -> web.Application:
                 repair.merged_contents,
             )
             await _write_repair_cards(bot, config, catalog, repair)
+        runtime_status["movie_nobita_cleanup"] = await _purge_movie_nobita_doraemon(
+            bot,
+            config,
+            catalog,
+        )
         await register_commands(bot, config)
         await bot.set_webhook(
             url=config.webhook_url,
@@ -218,6 +330,7 @@ def create_application(config: Config) -> web.Application:
                 "pending_temporary_deliveries": panels.pending_temporary_delivery_count(),
                 "pending_legacy_topics": panels.pending_delivery_topic_count(),
                 "pending_catalog_ingest": ingest_batcher.pending_count(),
+                "movie_nobita_cleanup": runtime_status["movie_nobita_cleanup"],
             }
             return web.json_response(data)
         except StorageError:
