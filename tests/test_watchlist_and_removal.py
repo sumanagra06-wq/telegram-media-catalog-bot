@@ -428,8 +428,8 @@ async def test_schema_migration_rekeys_legacy_watchlist_entries_once():
     assert migrated.panel_workspace_message_id is None
     assert migrated.delivery_topic_id is None
     assert migrated.delivery_topics == {}
-    assert migrated.panel_workspace_is_receipt is False
-    assert users.snapshot().schema_version == 6
+    assert "panel_workspace_is_receipt" not in migrated.model_dump(mode="json")
+    assert users.snapshot().schema_version == 7
     assert len(migrated.watchlist) == 1
     entry_id, entry = next(iter(migrated.watchlist.items()))
     assert entry_id == entry.id

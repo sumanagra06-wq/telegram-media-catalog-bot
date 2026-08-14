@@ -7,13 +7,18 @@ from contextlib import suppress
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, TelegramObject
 
-from .models import DeliveryTopicRef
 from .repositories import UserRepository
 from .storage import StorageError
-from .utils import safe_html
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,7 +37,7 @@ def _message_is_unavailable(exc: TelegramBadRequest) -> bool:
 
 
 class PanelManager:
-    """Owns each pinned dashboard and one reusable workspace/latest-delivery card."""
+    """Owns each user's one pinned dashboard and one temporary workspace."""
 
     def __init__(
         self,
@@ -46,9 +51,14 @@ class PanelManager:
         self.expiry_seconds = expiry_seconds
         self._expiry_tasks: dict[int, asyncio.Task[None]] = {}
         self._user_locks: dict[int, asyncio.Lock] = {}
+        self._delivery_locks: dict[int, asyncio.Lock] = {}
 
     def _user_lock(self, user_id: int) -> asyncio.Lock:
         return self._user_locks.setdefault(user_id, asyncio.Lock())
+
+    def delivery_lock(self, user_id: int) -> asyncio.Lock:
+        """Serialize each user's protected copy and dashboard replacement sequence."""
+        return self._delivery_locks.setdefault(user_id, asyncio.Lock())
 
     def is_dashboard(self, user_id: int, message_id: int | None) -> bool:
         profile = self.users.get_user(user_id)
@@ -58,114 +68,64 @@ class PanelManager:
         profile = self.users.get_user(user_id)
         return bool(profile and profile.panel_workspace_message_id == message_id)
 
-    async def ensure_delivery_topic(
-        self,
-        user_id: int,
-        *,
-        category_id: str,
-        topic_name: str,
-        icon_color: int,
-        replace: bool = False,
-    ) -> int | None:
-        """Return one permanent delivery topic for a dynamic catalog category."""
-        async with self._user_lock(user_id):
-            profile = self.users.get_user(user_id)
-            if profile is None:
-                raise ValueError("User not found")
-            current = profile.delivery_topics.get(category_id)
-            if current is not None and not replace:
-                if current.name != topic_name:
-                    try:
-                        await self.bot.edit_forum_topic(
-                            user_id,
-                            current.message_thread_id,
-                            name=topic_name,
-                        )
-                    except TelegramAPIError:
-                        LOGGER.info(
-                            "Could not refresh delivery-topic name for user %s category %s",
-                            user_id,
-                            category_id,
-                        )
-                    else:
-                        await self.users.set_category_delivery_topic(
-                            user_id,
-                            category_id,
-                            DeliveryTopicRef(
-                                message_thread_id=current.message_thread_id,
-                                name=topic_name,
-                            ),
-                        )
-                return current.message_thread_id
+    async def _retire_delivery_topic(self, user_id: int, topic_id: int) -> bool:
+        unavailable_markers = (
+            "message thread not found",
+            "message thread is not found",
+            "thread not found",
+            "forum topic not found",
+            "topic not found",
+            "topic_id_invalid",
+            "thread was deleted",
+            "topic was deleted",
+            "chat is not a forum",
+        )
+        for attempt in range(3):
             try:
-                bot_user = await self.bot.get_me()
+                await self.bot.delete_forum_topic(user_id, topic_id)
+                return True
+            except TelegramBadRequest as exc:
+                return any(marker in str(exc).casefold() for marker in unavailable_markers)
+            except TelegramRetryAfter as exc:
+                if attempt == 2:
+                    return False
+                delay = min(max(float(exc.retry_after), 0.1), 30.0)
+            except (TelegramNetworkError, TelegramServerError):
+                if attempt == 2:
+                    return False
+                delay = 0.25 * (2**attempt)
             except TelegramAPIError:
-                LOGGER.warning(
-                    "Could not check private-topic support; delivering to General for user %s",
-                    user_id,
-                    exc_info=True,
-                )
-                return None
-            if not bot_user.has_topics_enabled:
-                LOGGER.warning(
-                    "Private-chat topics are disabled for the bot; delivering to General for user %s",
-                    user_id,
-                )
-                return None
-            try:
-                topic = await self.bot.create_forum_topic(
-                    user_id,
-                    topic_name,
-                    icon_color=icon_color,
-                )
-            except TelegramAPIError:
-                LOGGER.warning(
-                    "Could not create delivery topic for user %s", user_id, exc_info=True
-                )
-                return None
+                return False
+            LOGGER.warning(
+                "Transient failure retiring delivery topic %s for user %s; retrying (%s/3)",
+                topic_id,
+                user_id,
+                attempt + 2,
+            )
+            await asyncio.sleep(delay)
+        return False
 
-            legacy_topic_id = profile.delivery_topic_id
-            clear_legacy = legacy_topic_id is not None
-            if legacy_topic_id is not None:
-                with suppress(TelegramAPIError):
-                    await self.bot.edit_forum_topic(
-                        user_id,
-                        legacy_topic_id,
-                        name="🗃 Previous Deliveries",
+    async def cleanup_delivery_topics(self) -> tuple[int, int]:
+        """Delete retired private-chat topics and clear only successfully retired references."""
+        cleaned: dict[int, set[int]] = {}
+        failed = 0
+        for profile in self.users.list_users():
+            topic_ids = {topic.message_thread_id for topic in profile.delivery_topics.values()}
+            if profile.delivery_topic_id is not None:
+                topic_ids.add(profile.delivery_topic_id)
+            for topic_id in topic_ids:
+                if not await self._retire_delivery_topic(profile.telegram_user_id, topic_id):
+                    failed += 1
+                    LOGGER.warning(
+                        "Could not retire delivery topic %s for user %s",
+                        topic_id,
+                        profile.telegram_user_id,
                     )
-            try:
-                await self.users.set_category_delivery_topic(
-                    user_id,
-                    category_id,
-                    DeliveryTopicRef(
-                        message_thread_id=topic.message_thread_id,
-                        name=topic_name,
-                    ),
-                    clear_legacy=clear_legacy,
-                )
-            except (StorageError, ValueError):
-                with suppress(TelegramAPIError):
-                    await self.bot.delete_forum_topic(user_id, topic.message_thread_id)
-                raise
-            try:
-                await self.bot.send_message(
-                    user_id,
-                    f"{safe_html(topic_name)} <b>DELIVERY ARCHIVE</b>\n"
-                    "<blockquote>Protected files for this collection stay here.</blockquote>\n"
-                    "Files use compact metadata-only captions and are never removed by automatic "
-                    "chat cleanup.",
-                    message_thread_id=topic.message_thread_id,
-                )
-            except TelegramAPIError:
-                LOGGER.info("Could not post delivery-topic introduction for user %s", user_id)
-            return topic.message_thread_id
-
-    async def reopen_delivery_topic(self, user_id: int, topic_id: int) -> bool:
-        try:
-            await self.bot.reopen_forum_topic(user_id, topic_id)
-        except TelegramAPIError:
-            return False
-        return True
+                    continue
+                cleaned.setdefault(profile.telegram_user_id, set()).add(topic_id)
+        if cleaned:
+            await self.users.clear_delivery_topic_references(cleaned)
+        return sum(len(topic_ids) for topic_ids in cleaned.values()), failed
 
     async def ensure_dashboard(
         self,
@@ -328,38 +288,9 @@ class PanelManager:
             message = await self.bot.send_message(user_id, text, reply_markup=reply_markup)
             message_id = message.message_id
             await self.users.set_panel_workspace_message(user_id, message_id)
-        elif message_id is not None and profile.panel_workspace_is_receipt:
-            await self.users.set_panel_workspace_message(user_id, message_id)
         if message_id is not None:
             self.touch(user_id, message_id)
         return message_id
-
-    async def render_delivery_receipt(
-        self,
-        *,
-        user_id: int,
-        text: str,
-        reply_markup: InlineKeyboardMarkup,
-    ) -> int:
-        """Turn the one activity card into a persistent, reusable latest-delivery receipt."""
-        async with self._user_lock(user_id):
-            message_id = await self._render_workspace(
-                user_id=user_id,
-                text=text,
-                reply_markup=reply_markup,
-                create=True,
-            )
-            if message_id is None:
-                raise RuntimeError("Could not create delivery receipt")
-            task = self._expiry_tasks.pop(user_id, None)
-            if task is not None:
-                task.cancel()
-            try:
-                await self.users.mark_panel_workspace_receipt(user_id, message_id)
-            except (StorageError, ValueError):
-                self.touch(user_id, message_id)
-                raise
-            return message_id
 
     async def render_existing_workspace(
         self,
@@ -381,11 +312,7 @@ class PanelManager:
 
     def touch(self, user_id: int, message_id: int) -> bool:
         profile = self.users.get_user(user_id)
-        if (
-            profile is None
-            or profile.panel_workspace_message_id != message_id
-            or profile.panel_workspace_is_receipt
-        ):
+        if profile is None or profile.panel_workspace_message_id != message_id:
             return False
         previous = self._expiry_tasks.pop(user_id, None)
         if previous is not None:
@@ -457,12 +384,20 @@ class PanelManager:
                 expected_message_id=message_id,
             )
 
+    async def close_current_workspace(self, user_id: int) -> int | None:
+        profile = self.users.get_user(user_id)
+        if profile is None or profile.panel_workspace_message_id is None:
+            return None
+        message_id = profile.panel_workspace_message_id
+        if await self.close_workspace(user_id, message_id):
+            return message_id
+        return None
+
     async def cleanup_stale_workspaces(self) -> int:
         stale = [
             (profile.telegram_user_id, profile.panel_workspace_message_id)
             for profile in self.users.list_users()
             if profile.panel_workspace_message_id is not None
-            and not profile.panel_workspace_is_receipt
         ]
         for user_id, message_id in stale:
             try:

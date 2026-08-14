@@ -111,57 +111,11 @@ def panel_dashboard(
             f"👋 <b>Welcome{greeting}</b>\n\n"
             f"{DIVIDER}\n"
             "🔎 Search instantly or browse the complete catalog.\n"
-            "🗂 Protected files are separated into category delivery topics.\n"
+            "🔐 Protected files stay permanently in this private chat.\n"
             "📚 Watchlist additions stay inside the Watchlist panel.\n"
-            "⏱ Active screens expire after 5 quiet minutes; your latest receipt stays.\n"
+            "🧹 Search cards are temporary; the live dashboard refreshes after delivery.\n"
             f"{DIVIDER}\n"
-            "💡 Send a title directly in General whenever you prefer."
-        ),
-        builder.as_markup(),
-    )
-
-
-def delivery_receipt(
-    content: ContentRecord,
-    file: FileRecord,
-    category: Category,
-    topic_name: str | None,
-) -> tuple[str, InlineKeyboardMarkup]:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="🔎 Search again", callback_data="p:search", style="primary"),
-        InlineKeyboardButton(text="🗂 Browse", callback_data="p:browse", style="primary"),
-    )
-    builder.row(
-        InlineKeyboardButton(text="📚 Watchlist", callback_data="p:watchlist"),
-        InlineKeyboardButton(text="🏠 Main actions", callback_data="p:home"),
-    )
-    destination = topic_name or "General fallback"
-    location_hint = (
-        f"Open <b>{safe_html(topic_name)}</b> from the topic bar to view the file."
-        if topic_name
-        else "Topic delivery was unavailable, so the protected file was delivered in General."
-    )
-    detail = ""
-    if file.record_kind.value == "episode":
-        detail = f"Season {file.season} • Episode {file.episode}"
-    elif file.record_kind.value == "season_pack_part":
-        detail = f"Season {file.season} Pack • Part {file.pack_part or 1}"
-    else:
-        detail = "Movie file"
-    language = safe_html(", ".join(file.languages) if file.languages else "Unknown")
-    return (
-        (
-            "✅ <b>DELIVERY READY</b>\n"
-            f"<blockquote>{safe_html(content.title)} • {safe_html(detail)}</blockquote>\n"
-            f"{DIVIDER}\n"
-            f"📦 <b>Destination</b>  •  {safe_html(destination)}\n"
-            f"🗂 <b>Collection</b>  •  {safe_html(category.name)}\n"
-            f"🗣 <b>Language</b>  •  {language}\n"
-            f"💎 <b>Quality</b>  •  {safe_html(file.quality or 'Unknown')}\n"
-            f"{DIVIDER}\n"
-            f"{location_hint}\n\n"
-            "This card is reused for your next action, so General stays clean."
+            "💡 Send a title directly in this chat whenever you prefer."
         ),
         builder.as_markup(),
     )

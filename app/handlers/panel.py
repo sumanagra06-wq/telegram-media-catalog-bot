@@ -260,13 +260,13 @@ async def panel_help_callback(
         callback,
         panels,
         "❓ <b>HELP & QUICK GUIDE</b>\n"
-        "<blockquote>Clean search, dedicated Watchlists, threaded delivery.</blockquote>\n"
+        "<blockquote>Clean search, dedicated Watchlists, flat-chat delivery.</blockquote>\n"
         f"{DIVIDER}\n"
         "<b>1.</b> 🔎 Send a title or use Search\n"
         "<b>2.</b> 🎯 Open the matching title and choose its file\n"
-        "<b>3.</b> 🗂 Receive media in its Movies, Series, or dynamic category topic\n"
+        "<b>3.</b> 🔐 Receive the permanent protected file in this chat\n"
         "<b>4.</b> 📚 Use Watchlist—not Search—to save titles\n\n"
-        "🧹 General keeps one reusable latest-delivery receipt instead of card clutter.\n"
+        "🧹 Queries and temporary cards are removed; one fresh dashboard follows delivery.\n"
         "⏱ Every workspace interaction restarts its 5-minute timer.",
         builder.as_markup(),
     )

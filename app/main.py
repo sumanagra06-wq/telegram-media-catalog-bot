@@ -124,6 +124,22 @@ def create_application(config: Config) -> web.Application:
         await users_store.initialize()
         await catalog.migrate_schema()
         await users.migrate_schema()
+        retired_topics, failed_topics = await panels.cleanup_delivery_topics()
+        if retired_topics:
+            LOGGER.warning(
+                "Permanently retired %s legacy delivery topics during flat-chat migration",
+                retired_topics,
+            )
+        if failed_topics:
+            LOGGER.warning(
+                "%s legacy delivery topics could not be retired and will be retried on restart",
+                failed_topics,
+            )
+        else:
+            LOGGER.info(
+                "Legacy delivery-topic cleanup complete (%s retired this startup; none pending)",
+                retired_topics,
+            )
         cleaned_workspaces = await panels.cleanup_stale_workspaces()
         if cleaned_workspaces:
             LOGGER.info("Removed %s stale workspace references after restart", cleaned_workspaces)
@@ -146,12 +162,12 @@ def create_application(config: Config) -> web.Application:
         threaded_mode_enabled = bool(identity.has_topics_enabled)
         runtime_status["threaded_mode_enabled"] = threaded_mode_enabled
         if threaded_mode_enabled:
-            LOGGER.info("BotFather Threaded Mode is enabled; delivery topics are available")
-        else:
             LOGGER.warning(
-                "BotFather Threaded Mode is DISABLED; protected files will use the General "
-                "fallback until it is enabled in BotFather"
+                "Flat-chat delivery is active but BotFather Threaded Mode is still enabled; "
+                "disable it to restore Telegram's normal private-chat interface"
             )
+        else:
+            LOGGER.info("BotFather Threaded Mode is disabled; flat-chat delivery is active")
         LOGGER.info(
             "Started @%s with catalog r%s and users r%s",
             identity.username,
@@ -174,6 +190,7 @@ def create_application(config: Config) -> web.Application:
                 "catalog_revision": catalog.snapshot().revision,
                 "users_revision": users.snapshot().revision,
                 "threaded_mode_enabled": runtime_status["threaded_mode_enabled"],
+                "delivery_mode": "flat_chat",
             }
             return web.json_response(data)
         except StorageError:

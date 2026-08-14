@@ -14,7 +14,6 @@ from .models import (
     CategoryMode,
     ContentKind,
     ContentRecord,
-    DeliveryTopicRef,
     FileRecord,
     IndexFailure,
     MediaType,
@@ -724,7 +723,7 @@ class UserRepository:
         return self.store.snapshot()
 
     async def migrate_schema(self) -> bool:
-        needs_migration = self.store.state.schema_version < 6 or any(
+        needs_migration = self.store.state.schema_version < 7 or any(
             not entry.id or key != entry.id
             for user in self.store.state.users.values()
             for key, entry in user.watchlist.items()
@@ -750,10 +749,7 @@ class UserRepository:
                     changed = True
                 if changed:
                     user.updated_at = utcnow_iso()
-            for user in state.users.values():
-                if user.panel_workspace_message_id is None:
-                    user.panel_workspace_is_receipt = False
-            state.schema_version = 6
+            state.schema_version = 7
             return True
 
         return await self.store.mutate(mutate)
@@ -858,31 +854,34 @@ class UserRepository:
 
         return await self.store.mutate(mutate)
 
-    async def set_category_delivery_topic(
+    async def clear_delivery_topic_references(
         self,
-        user_id: int,
-        category_id: str,
-        topic: DeliveryTopicRef,
-        *,
-        clear_legacy: bool = False,
-    ) -> UserProfile:
-        current = self.store.state.users.get(str(user_id))
-        if current is None:
-            raise ValueError("User not found")
-        if current.delivery_topics.get(category_id) == topic and (
-            not clear_legacy or current.delivery_topic_id is None
-        ):
-            return current.model_copy(deep=True)
+        cleaned_topic_ids: dict[int, set[int]],
+    ) -> int:
+        if not cleaned_topic_ids:
+            return 0
 
-        def mutate(state: UsersState) -> UserProfile:
-            user = state.users.get(str(user_id))
-            if user is None:
-                raise ValueError("User not found")
-            user.delivery_topics[category_id] = topic
-            if clear_legacy:
-                user.delivery_topic_id = None
-            user.updated_at = utcnow_iso()
-            return user.model_copy(deep=True)
+        def mutate(state: UsersState) -> int:
+            cleared = 0
+            now = utcnow_iso()
+            for user_id, topic_ids in cleaned_topic_ids.items():
+                user = state.users.get(str(user_id))
+                if user is None:
+                    continue
+                changed = False
+                if user.delivery_topic_id in topic_ids:
+                    user.delivery_topic_id = None
+                    cleared += 1
+                    changed = True
+                for category_id, topic in tuple(user.delivery_topics.items()):
+                    if topic.message_thread_id not in topic_ids:
+                        continue
+                    user.delivery_topics.pop(category_id)
+                    cleared += 1
+                    changed = True
+                if changed:
+                    user.updated_at = now
+            return cleared
 
         return await self.store.mutate(mutate)
 
@@ -907,10 +906,7 @@ class UserRepository:
         current = self.store.state.users.get(str(user_id))
         if current is None:
             raise ValueError("User not found")
-        if (
-            current.panel_workspace_message_id == message_id
-            and not current.panel_workspace_is_receipt
-        ):
+        if current.panel_workspace_message_id == message_id:
             return current.model_copy(deep=True)
 
         def mutate(state: UsersState) -> UserProfile:
@@ -918,28 +914,6 @@ class UserRepository:
             if user is None:
                 raise ValueError("User not found")
             user.panel_workspace_message_id = message_id
-            user.panel_workspace_is_receipt = False
-            user.updated_at = utcnow_iso()
-            return user.model_copy(deep=True)
-
-        return await self.store.mutate(mutate)
-
-    async def mark_panel_workspace_receipt(
-        self,
-        user_id: int,
-        message_id: int,
-    ) -> UserProfile:
-        current = self.store.state.users.get(str(user_id))
-        if current is None or current.panel_workspace_message_id != message_id:
-            raise ValueError("Workspace changed before receipt persistence")
-        if current.panel_workspace_is_receipt:
-            return current.model_copy(deep=True)
-
-        def mutate(state: UsersState) -> UserProfile:
-            user = state.users.get(str(user_id))
-            if user is None or user.panel_workspace_message_id != message_id:
-                raise ValueError("Workspace changed before receipt persistence")
-            user.panel_workspace_is_receipt = True
             user.updated_at = utcnow_iso()
             return user.model_copy(deep=True)
 
@@ -970,7 +944,6 @@ class UserRepository:
             ):
                 return False
             user.panel_workspace_message_id = None
-            user.panel_workspace_is_receipt = False
             user.updated_at = utcnow_iso()
             return True
 
@@ -978,8 +951,7 @@ class UserRepository:
 
     async def clear_all_panel_workspace_messages(self) -> int:
         if not any(
-            user.panel_workspace_message_id is not None and not user.panel_workspace_is_receipt
-            for user in self.store.state.users.values()
+            user.panel_workspace_message_id is not None for user in self.store.state.users.values()
         ):
             return 0
 
@@ -987,10 +959,9 @@ class UserRepository:
             cleared = 0
             now = utcnow_iso()
             for user in state.users.values():
-                if user.panel_workspace_message_id is None or user.panel_workspace_is_receipt:
+                if user.panel_workspace_message_id is None:
                     continue
                 user.panel_workspace_message_id = None
-                user.panel_workspace_is_receipt = False
                 user.updated_at = now
                 cleared += 1
             return cleared
