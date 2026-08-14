@@ -51,6 +51,13 @@ class ContentRemovalResult:
 
 
 @dataclass(frozen=True)
+class BulkContentRemovalResult:
+    contents: tuple[ContentRecord, ...]
+    files: tuple[FileRecord, ...]
+    sources: tuple[RemovedSourceRecord, ...]
+
+
+@dataclass(frozen=True)
 class BulkWatchlistResult:
     entries: tuple[WatchlistEntry, ...]
     created: int
@@ -696,6 +703,61 @@ class CatalogRepository:
             metadata=metadata,
         )
         return (await self.upsert_files([request]))[0]
+
+    async def remove_contents(
+        self,
+        content_ids: Iterable[str],
+        actor_id: int,
+    ) -> BulkContentRemovalResult:
+        """Atomically remove existing titles and tombstone all of their source messages."""
+
+        requested = set(content_ids)
+        if not requested:
+            return BulkContentRemovalResult(contents=(), files=(), sources=())
+
+        def mutate(state: CatalogState) -> BulkContentRemovalResult:
+            contents = sorted(
+                (state.contents[item_id] for item_id in requested if item_id in state.contents),
+                key=lambda item: (item.title.casefold(), item.id),
+            )
+            selected_ids = {content.id for content in contents}
+            files = sorted(
+                (record for record in state.files.values() if record.content_id in selected_ids),
+                key=lambda record: (record.source_chat_id, record.source_message_id, record.id),
+            )
+            titles = {content.id: content.title for content in contents}
+            sources: list[RemovedSourceRecord] = []
+            for record in files:
+                source = _source_key(record.source_chat_id, record.source_message_id)
+                tombstone = RemovedSourceRecord(
+                    source_chat_id=record.source_chat_id,
+                    source_message_id=record.source_message_id,
+                    content_title=titles.get(record.content_id, record.title),
+                )
+                state.removed_sources[source] = tombstone
+                sources.append(tombstone)
+                state.files.pop(record.id, None)
+                state.source_lookup.pop(source, None)
+                state.failures.pop(source, None)
+
+            for content in contents:
+                state.contents.pop(content.id, None)
+            for key, value in list(state.content_lookup.items()):
+                if value in selected_ids:
+                    state.content_lookup.pop(key, None)
+            _append_audit(
+                state,
+                "content.remove_bulk",
+                f"Removed {len(contents)} titles with {len(files)} files",
+                actor_id,
+            )
+            return BulkContentRemovalResult(
+                contents=tuple(content.model_copy(deep=True) for content in contents),
+                files=tuple(record.model_copy(deep=True) for record in files),
+                sources=tuple(item.model_copy(deep=True) for item in sources),
+            )
+
+        return await self.store.mutate(mutate)
 
     async def remove_content(
         self,

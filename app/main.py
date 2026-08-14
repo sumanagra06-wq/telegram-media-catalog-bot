@@ -138,26 +138,21 @@ async def _purge_movie_nobita_doraemon(
         ),
         key=lambda content: (content.title.casefold(), content.id),
     )
-    removed_titles: list[str] = []
-    removed_file_count = 0
     source_candidates: dict[tuple[int, int], RemovedSourceRecord] = {
         (source.source_chat_id, source.source_message_id): source
         for source in catalog.pending_removed_sources()
         if source.source_chat_id in target_source_chats
         and title_terms.intersection(normalize_title(source.content_title).split())
     }
-    actor_id = min(config.owner_ids)
-    for content in matching_contents:
-        try:
-            result = await catalog.remove_content(content.id, actor_id)
-        except ValueError:
-            # A retry or overlapping channel update may already have removed this exact title.
-            continue
-        removed_titles.append(result.content.title)
-        removed_file_count += len(result.files)
-        source_candidates.update(
-            {(source.source_chat_id, source.source_message_id): source for source in result.sources}
-        )
+    result = await catalog.remove_contents(
+        (content.id for content in matching_contents),
+        min(config.owner_ids),
+    )
+    removed_titles = [content.title for content in result.contents]
+    removed_file_count = len(result.files)
+    source_candidates.update(
+        {(source.source_chat_id, source.source_message_id): source for source in result.sources}
+    )
 
     deleted, failed = await admin._delete_source_posts(
         bot,
