@@ -6,10 +6,17 @@ import hashlib
 import io
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, Generic, Protocol, TypeVar
 
 from aiogram import Bot
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.types import BufferedInputFile
 from pydantic import BaseModel
 
@@ -22,6 +29,52 @@ MAX_COMPRESSED_SNAPSHOT_BYTES = 18 * 1024 * 1024
 
 StateT = TypeVar("StateT", bound=VersionedState)
 ResultT = TypeVar("ResultT")
+TelegramResultT = TypeVar("TelegramResultT")
+
+
+async def _telegram_call_with_retry(
+    operation: Callable[[], Awaitable[TelegramResultT]],
+    *,
+    description: str,
+    benign_bad_request: tuple[str, ...] = (),
+    attempts: int = 4,
+) -> TelegramResultT:
+    """Honor Telegram flood waits and retry transient snapshot transport failures."""
+    for attempt in range(attempts):
+        try:
+            return await operation()
+        except TelegramRetryAfter as exc:
+            if attempt + 1 >= attempts:
+                raise
+            delay = max(float(exc.retry_after), 0.1) + 0.1
+            LOGGER.warning(
+                "%s was flood-limited; retrying in %.1f seconds (%s/%s)",
+                description,
+                delay,
+                attempt + 1,
+                attempts,
+            )
+        except TelegramBadRequest as exc:
+            message = str(exc).casefold()
+            if any(value in message for value in benign_bad_request):
+                return None  # type: ignore[return-value]
+            raise
+        except (TelegramNetworkError, TelegramServerError):
+            if attempt + 1 >= attempts:
+                raise
+            delay = 0.5 * (2**attempt)
+            LOGGER.warning(
+                "%s hit a transient Telegram error; retrying in %.1f seconds (%s/%s)",
+                description,
+                delay,
+                attempt + 1,
+                attempts,
+                exc_info=True,
+            )
+        except TelegramAPIError:
+            raise
+        await asyncio.sleep(delay)
+    raise RuntimeError(f"Telegram retry loop exhausted for {description}")
 
 
 class StorageError(RuntimeError):
@@ -164,14 +217,17 @@ class TelegramSnapshotBackend:
             )
 
         checksum = hashlib.sha256(compressed).hexdigest()
-        snapshot_message = await self.bot.send_document(
-            chat_id=self.channel_id,
-            document=BufferedInputFile(
-                compressed,
-                filename=f"{self.kind}-r{revision}.json.gz",
+        snapshot_message = await _telegram_call_with_retry(
+            lambda: self.bot.send_document(
+                chat_id=self.channel_id,
+                document=BufferedInputFile(
+                    compressed,
+                    filename=f"{self.kind}-r{revision}.json.gz",
+                ),
+                caption=f"{self.kind} database snapshot • revision {revision}",
+                disable_notification=True,
             ),
-            caption=f"{self.kind} database snapshot • revision {revision}",
-            disable_notification=True,
+            description=f"upload {self.kind} snapshot r{revision}",
         )
         if snapshot_message.document is None:
             raise StorageError("Telegram did not return a document for the uploaded snapshot")
@@ -195,24 +251,35 @@ class TelegramSnapshotBackend:
 
         try:
             if self.manifest_message_id is None:
-                pointer = await self.bot.send_message(
-                    chat_id=self.channel_id,
-                    text=self._manifest_text(new_manifest),
-                    parse_mode=None,
-                    disable_notification=True,
+                pointer = await _telegram_call_with_retry(
+                    lambda: self.bot.send_message(
+                        chat_id=self.channel_id,
+                        text=self._manifest_text(new_manifest),
+                        parse_mode=None,
+                        disable_notification=True,
+                    ),
+                    description=f"create {self.kind} snapshot manifest",
                 )
                 self.manifest_message_id = pointer.message_id
-                await self.bot.pin_chat_message(
-                    chat_id=self.channel_id,
-                    message_id=pointer.message_id,
-                    disable_notification=True,
+                await _telegram_call_with_retry(
+                    lambda: self.bot.pin_chat_message(
+                        chat_id=self.channel_id,
+                        message_id=pointer.message_id,
+                        disable_notification=True,
+                    ),
+                    description=f"pin {self.kind} snapshot manifest",
+                    benign_bad_request=("already pinned",),
                 )
             else:
-                await self.bot.edit_message_text(
-                    chat_id=self.channel_id,
-                    message_id=self.manifest_message_id,
-                    text=self._manifest_text(new_manifest),
-                    parse_mode=None,
+                await _telegram_call_with_retry(
+                    lambda: self.bot.edit_message_text(
+                        chat_id=self.channel_id,
+                        message_id=self.manifest_message_id,
+                        text=self._manifest_text(new_manifest),
+                        parse_mode=None,
+                    ),
+                    description=f"commit {self.kind} snapshot manifest r{revision}",
+                    benign_bad_request=("message is not modified",),
                 )
         except Exception:
             # The unreferenced snapshot is safe to remove; the old manifest is still valid.

@@ -6,7 +6,7 @@ This report records checks performed before packaging. It is not a claim that li
 
 - Telegram snapshot transaction order, manifest recovery, checksums and previous-revision fallback
 - Dynamic categories, legacy channels and idempotent source-message updates
-- Atomic high-throughput ingestion, compact burst audit summaries, synchronous webhook durability, and failed-batch rollback
+- Atomic high-throughput ingestion, compact burst audit summaries, synchronous webhook durability, failed-batch rollback, and exact Telegram flood-wait retries
 - Large-series navigation with 18+ seasons and paginated 50+ episode seasons
 - User access states, exact watchlist statuses, manual/catalog entry flows, and read-only public sharing
 - User-scoped watchlist mutation authorization and private-visibility enforcement
@@ -84,6 +84,7 @@ This report records checks performed before packaging. It is not a claim that li
 38. Added an adaptive catalog ingestion batcher for the confirmed 100-file/two-minute burst pattern. Concurrent valid channel posts coalesce into atomic groups of up to 100, reducing full Telegram snapshot uploads from one per file to one per received burst group without acknowledging a webhook before durability. A failed batch rolls back as a unit and remains retryable.
 39. Replaced per-file burst audit cards with a bounded human-readable summary while preserving each file's individual catalog audit event. Search/browse/recent paths now copy only content summaries and use direct visibility checks instead of deep-copying the growing full file index. Health adds live file/pending-ingestion counts and current/maximum compressed snapshot bytes.
 40. Confirmed large-series flexibility with three-digit seasons, four-digit episodes, 20-episode UI pagination, and automated navigation coverage for 18 seasons plus a 55-episode season.
+41. Hardened Telegram persistence against the observed `RetryAfter: retry in 34 seconds` response. Snapshot uploads and manifest commits now honor the full server-requested delay with bounded retries; batched index audits, dashboard operations, and broadcasts use the same non-early retry rule. Tests inject flood waits into both snapshot and audit-message paths.
 
 No catalog record or Telegram source post was removed for the cancelled Doraemon/Nobita deletion request. This release contains no task-specific bulk deletion path.
 
@@ -92,8 +93,8 @@ No catalog record or Telegram source post was removed for the cancelled Doraemon
 - Ruff lint: passed
 - Ruff formatting check: passed
 - Python compileall: passed
-- Pytest with warnings treated as errors: passed (125 tests)
-- Test coverage: 67% overall; burst ingestion 81%, metadata parser 97%, snapshot storage 84%, repositories 78%, services 88%, panel handlers 54%, Watchlist handlers 60%, delivery/search handlers 58%, panel lifecycle manager 70%, UI 78%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
+- Pytest with warnings treated as errors: passed (127 tests)
+- Test coverage: 67% overall; burst ingestion 85%, metadata parser 97%, snapshot storage 79%, repositories 78%, services 88%, panel handlers 54%, Watchlist handlers 60%, delivery/search handlers 58%, panel lifecycle manager 70%, UI 78%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
 - Synthetic growth check: 9,000 distinct files across 90 atomic 100-file batches completed in 35.888 seconds locally; the deterministic gzip catalog was 846,636 bytes, or 4.49% of the enforced 18 MiB ceiling
 - Bandit: passed; the required Railway `0.0.0.0` bind is explicitly documented/suppressed
 - pip-audit: passed, no known vulnerabilities in production requirements
@@ -119,6 +120,7 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Catalog schema-v2 → v3 migration and idempotence
 - A concurrent 100-file channel burst committing in one catalog revision and producing one compact audit summary
 - Full-batch rollback on injected snapshot failure followed by a successful delayed retry
+- Injected 34-second flood waits on snapshot upload, manifest commit, and batched audit delivery
 - 18-season title navigation and three-page rendering for a 55-episode season
 - Category creation and series grouping
 - Duplicate channel-update idempotency

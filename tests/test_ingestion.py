@@ -1,9 +1,12 @@
 import asyncio
 from types import SimpleNamespace
 
+from aiogram.exceptions import TelegramRetryAfter
+from aiogram.methods import SendMessage
+
 from app.config import Config
 from app.handlers.channel import index_source_message
-from app.ingestion import CatalogIngestBatcher, IndexAuditBatcher
+from app.ingestion import CatalogIngestBatcher, IndexAuditBatcher, IndexAuditEntry
 from app.metadata import parse_metadata
 from app.models import CatalogState, CategoryMode, MediaType
 from app.repositories import CatalogRepository, FileUpsertRequest
@@ -15,8 +18,18 @@ from app.ui import content_screen, season_screen
 class FakeBot:
     def __init__(self):
         self.sent_messages = []
+        self.send_attempts = 0
+        self.send_floods = 0
 
     async def send_message(self, chat_id, text, **kwargs):
+        self.send_attempts += 1
+        if self.send_floods:
+            self.send_floods -= 1
+            raise TelegramRetryAfter(
+                SendMessage(chat_id=chat_id, text=text),
+                "flood control",
+                retry_after=34,
+            )
         self.sent_messages.append((chat_id, text, kwargs))
         return SimpleNamespace(message_id=len(self.sent_messages))
 
@@ -168,3 +181,31 @@ async def test_delayed_ingest_batch_rolls_back_together_and_can_retry_after_stor
     assert record.episode == 1
     assert content.title == "Recovery Show"
     assert catalog.snapshot().revision == revision + 1
+
+
+async def test_batched_audit_summary_honors_telegram_flood_wait(monkeypatch):
+    bot = FakeBot()
+    bot.send_floods = 1
+    audits = IndexAuditBatcher(bot, -1001, delay_seconds=10, max_batch_size=1)
+    delays = []
+
+    async def no_sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr("app.ingestion.asyncio.sleep", no_sleep)
+    await audits.submit(
+        IndexAuditEntry(
+            detail_text="✅ FILE INDEXED",
+            created=True,
+            category_name="Series",
+            title="Flexible Show",
+            source_message_id=1,
+            season=16,
+            episode=55,
+        )
+    )
+    await audits.shutdown()
+
+    assert bot.send_attempts == 2
+    assert delays == [34.1]
+    assert bot.sent_messages[0][1] == "✅ FILE INDEXED"

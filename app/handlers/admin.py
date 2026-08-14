@@ -216,7 +216,7 @@ async def _copy_broadcast_message(
         except TelegramRetryAfter as exc:
             if attempt == 2:
                 return False
-            delay = min(max(float(exc.retry_after), 0.1), 30.0)
+            delay = max(float(exc.retry_after), 0.1) + 0.1
         except (TelegramNetworkError, TelegramServerError):
             if attempt == 2:
                 return False

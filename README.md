@@ -7,6 +7,7 @@ A private-channel media catalog for movies and series. Telegram stores both the 
 - Dynamic private storage categories; no category channel IDs are hardcoded
 - Automatic indexing of new and edited video/document channel posts
 - Burst-safe catalog ingestion that coalesces up to 100 concurrent channel files into one atomic Telegram snapshot commit and one rate-limited human audit summary
+- Flood-wait-aware snapshot uploads, manifest commits, audit summaries, dashboard refreshes, and broadcasts that honor Telegram's requested retry interval
 - Owner-assisted `/index` import for an older forwarded channel post
 - Messy filename-style metadata parsing with tested support for:
   - `S02E01`, `S02-E19`, and `S03 E01`
