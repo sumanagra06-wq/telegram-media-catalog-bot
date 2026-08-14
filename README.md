@@ -14,11 +14,15 @@ A private-channel media catalog for movies and series. Telegram stores both the 
   - split season archives such as `.zip.001`, `.002`, `.003`
   - leading uploader mentions, emojis, technical codec text, and forwarding warnings
   - complete filename-style values after labels such as `Name:` or `Title:`
-- Only title, year, language, quality, season, and episode/pack part are indexed from captions
+  - `MOVIES.IN:` headers and `Movie No.<n>: <title>` captions with separate metadata lines
+  - mixed captions containing multiple filenames, with the descriptive Telegram attachment filename authoritative for media identity and metadata
+  - combined episode ranges such as `S18.Ep.1to15` and `Ep31To40`
+  - `Eng`/`Jap` language aliases and `FHD → 1080p` normalization
+- Only title, year, language, quality, season, episode/range, and pack part are indexed from captions
 - Exact, prefix, word, substring, and typo-tolerant title ranking
 - Four search results per page
 - Series navigation: title → season → episode → variant → protected file
-- Season packs: title → season → Complete Season Pack → Part 1/2/3
+- Season packs: split archives remain Part 1/2/3; combined files are labeled by exact episode range (for example, Episodes 1–15)
 - Movie navigation: title → language/quality variant → protected file
 - Dedicated Watchlist panel with manual-title and existing-catalog add flows
 - Dynamic category selection and exactly three statuses: To Watch, On Hold, Completed
@@ -32,6 +36,8 @@ A private-channel media catalog for movies and series. Telegram stores both the 
 - Delivery-only Search, Browse, Recently Added, and title/file detail flows; they cannot add to Watchlists
 - Checkbox multi-selection only inside Watchlist → Add a title → Choose from the library, with atomic bulk insertion
 - One unified owner dashboard with an authorization-checked Admin Control Center entry
+- Owner-only Admin Control Center broadcast composer for text/photo/video/document sources, exact all-profile recipient count, preview, one confirmation, paced retry-aware copying, per-recipient dashboard refresh, audit, and sent/failed totals
+- Broadcast recipients include every stored registered profile regardless of active, pending, suspended, or banned status; unreachable accounts are counted as failures
 - Flat private-chat delivery for every catalog category, with protected files sent directly through `protect_content=True` and no topic routing
 - Permanent, button-free delivered files with premium metadata captions; catalog source posts remain unaffected
 - Destructive, retry-safe retirement of legacy bot-created delivery/category topics during migration
@@ -167,7 +173,12 @@ Maamla Legal Hai S02E01 1080p Hindi WEB DL 5 1 ESub x264 Mov mkv
 @UHDPrime Game of Thrones S03 E01 BluRay 720p Hindi 2 0 English mkv
 Name: Operation Safed Sagar The Highest Air Force Mission S01E01 1 mkv
 Game.Of.Thrones.S01.720p.10Bit.BluRay.Hindi-English.HEVC.x265.zip.zip.001
+Doraemon S01E25 [RareToonsIndia].mkv
+Doraemon.S18.Ep.1to15.Combined.Multi.Audio+Hindi.mkv
+Doraemon.S18.Ep31To40.Hindi+Multi.Audio.mkv
 ```
+
+The last two examples are combined Season Pack files and are displayed as `Episodes 1–15` and `Episodes 31–40`, not as individual Episode 1/Episode 31 records or as one complete archive.
 
 A filename-style movie can look like:
 
@@ -183,6 +194,19 @@ Year: 2024
 Language: Hindi, English
 Quality: 2160p
 ```
+
+Movie-header and numbered-movie captions are also accepted:
+
+```text
+MOVIES.IN:
+Stand by Me Doraemon 2 (2020) 720p HEVC [Hindi-Eng-Jap].mkv
+
+Movie No.37: Doraemon Nobita Little Star War Movie
+Quality: 1080P FHD
+Language: Hindi Dubbed
+```
+
+When one Telegram caption contains promotional text or several media filenames, a descriptive attached filename (for example, one containing `S01E25`, a year, or a quality token) is authoritative. This prevents an unrelated filename or metadata block in the caption from being indexed. Ordinary single-media captions and generic attachment names retain the existing caption fallback.
 
 Missing year/language/quality is indexed as Unknown. A title is always required. Episodic categories also require a season; the record must contain an episode or be identifiable as a season pack.
 
@@ -209,6 +233,12 @@ Movies, episodes, videos, documents, and every season-pack part are copied direc
 Each delivered file contains only the protected media and a premium metadata caption—no inline action keyboard. Delivered files are never registered as temporary UI and are not automatically deleted. The successful-delivery sequence removes the callback source/workspace, posts a fresh dashboard after the file, pins it, and retires the old dashboard. The steady-state timeline therefore contains permanent delivered files and exactly one current live dashboard, with no delivery receipt.
 
 The owner's pinned card is the same user dashboard with one additional Admin Control Center entry. Owner authorization is still enforced by the handler, not merely by hiding the button. The dashboard is the final user-facing interaction system; old native user and admin commands are no longer registered or handled.
+
+### Owner broadcast
+
+Open Dashboard → Admin Control Center → Broadcast. Send/forward one text, photo, video, or document, or reply to an existing supported message with a short trigger message. The confirmation card displays the source type, a safe text/caption preview, and the exact current count from stored user profiles. One explicit confirmation starts delivery.
+
+The bot copies the source message without action buttons to every stored profile, including pending, suspended, and banned profiles. Transient network/server/flood-control errors receive bounded retries; permanently unreachable accounts are reported as failures. Only successful recipients receive a fresh pinned dashboard below the announcement. All prepared dashboard references are persisted in one atomic users-snapshot commit before old dashboards are retired; a failed commit rolls back the fresh cards and preserves the tracked old dashboards. The final owner report and catalog audit include message and dashboard sent/failed totals.
 
 The native command menu contains only the emergency recovery command:
 
@@ -276,7 +306,7 @@ pip-audit -r requirements.txt
 bandit -q -r app
 ```
 
-The test suite covers the supplied real caption formats, split archives, metadata allowlisting, dynamic categories, duplicate update idempotency, search ordering, series grouping, exact Watchlist statuses, snapshot rollback/fallback, Telegram callback-size limits, pinned-dashboard recovery, concurrent workspace reuse, destructive legacy-topic cleanup with failure-safe reference retention, direct flat-chat copy and Telegram file-ID fallback, button-free delivery captions, dashboard replacement and rollback, permanent delivered-file retention across repeated deliveries, typed-query cleanup, topic-message exclusion during migration, dedicated Watchlist checkbox state across pages and alphabet filters, stale discovery callback retirement, editable community names, always-public enforcement, owner authorization, and atomic bulk Watchlist rollback.
+The test suite covers the supplied real caption formats, `MOVIES.IN`, numbered movie captions, mixed-caption attachment authority, ordinary episodes, combined episode ranges, split archives, catalog schema-v3 migration, metadata allowlisting, dynamic categories, duplicate update idempotency, search ordering, range-aware Season Pack UI, series grouping, exact Watchlist statuses, snapshot rollback/fallback, Telegram callback-size limits, pinned-dashboard recovery, concurrent workspace reuse, destructive legacy-topic cleanup with failure-safe reference retention, direct flat-chat copy and Telegram file-ID fallback, button-free delivery captions, dashboard replacement and rollback, broadcast owner authorization/recipient inclusion/retry/partial failure/atomic dashboard persistence, permanent delivered-file retention across repeated deliveries, typed-query cleanup, topic-message exclusion during migration, dedicated Watchlist checkbox state across pages and alphabet filters, stale discovery callback retirement, editable community names, always-public enforcement, and atomic bulk Watchlist rollback.
 
 Run the webhook application:
 

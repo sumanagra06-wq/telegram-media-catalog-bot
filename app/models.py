@@ -90,6 +90,8 @@ class FileRecord(BaseModel):
     quality: str | None = None
     season: int | None = None
     episode: int | None = None
+    episode_start: int | None = None
+    episode_end: int | None = None
     pack_part: int | None = None
     available: bool = True
     created_at: str = Field(default_factory=utcnow_iso)
@@ -128,7 +130,7 @@ class RemovedSourceRecord(BaseModel):
 
 
 class CatalogState(VersionedState):
-    schema_version: int = 2
+    schema_version: int = 3
     kind: str = "catalog"
     categories: dict[str, Category] = Field(default_factory=dict)
     contents: dict[str, ContentRecord] = Field(default_factory=dict)

@@ -238,6 +238,113 @@ class PanelManager:
                     await self.bot.delete_message(user_id, previous_id)
             return message_id
 
+    async def _send_broadcast_dashboard(
+        self,
+        user_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup,
+    ) -> Message | None:
+        for attempt in range(3):
+            try:
+                return await self.bot.send_message(
+                    user_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+            except TelegramRetryAfter as exc:
+                if attempt == 2:
+                    return None
+                delay = min(max(float(exc.retry_after), 0.1), 30.0)
+            except (TelegramNetworkError, TelegramServerError):
+                if attempt == 2:
+                    return None
+                delay = 0.25 * (2**attempt)
+            except TelegramAPIError:
+                return None
+            await asyncio.sleep(delay)
+        return None
+
+    async def _pin_broadcast_dashboard(self, user_id: int, message_id: int) -> bool:
+        for attempt in range(3):
+            try:
+                await self.bot.pin_chat_message(
+                    user_id,
+                    message_id,
+                    disable_notification=True,
+                )
+                return True
+            except TelegramRetryAfter as exc:
+                if attempt == 2:
+                    return False
+                delay = min(max(float(exc.retry_after), 0.1), 30.0)
+            except (TelegramNetworkError, TelegramServerError):
+                if attempt == 2:
+                    return False
+                delay = 0.25 * (2**attempt)
+            except TelegramAPIError:
+                return False
+            await asyncio.sleep(delay)
+        return False
+
+    async def repost_dashboards(
+        self,
+        dashboards: list[tuple[int, str, InlineKeyboardMarkup]],
+    ) -> tuple[int, int]:
+        """Prepare many pinned replacements and persist their IDs in one snapshot commit."""
+        prepared: dict[int, tuple[int | None, int]] = {}
+        failed = 0
+        for user_id, text, reply_markup in dashboards:
+            async with self._user_lock(user_id):
+                profile = self.users.get_user(user_id)
+                if profile is None:
+                    failed += 1
+                    continue
+                previous_id = profile.panel_dashboard_message_id
+                message = await self._send_broadcast_dashboard(user_id, text, reply_markup)
+                if message is None:
+                    failed += 1
+                    LOGGER.warning(
+                        "Could not send broadcast dashboard for user %s",
+                        user_id,
+                    )
+                    continue
+                if not await self._pin_broadcast_dashboard(user_id, message.message_id):
+                    failed += 1
+                    LOGGER.warning(
+                        "Could not pin broadcast dashboard for user %s",
+                        user_id,
+                    )
+                    with suppress(TelegramAPIError):
+                        await self.bot.delete_message(user_id, message.message_id)
+                    continue
+                prepared[user_id] = (previous_id, message.message_id)
+            await asyncio.sleep(0.05)
+
+        try:
+            applied = await self.users.replace_panel_dashboard_messages(prepared)
+        except StorageError:
+            for user_id, (_, message_id) in prepared.items():
+                with suppress(TelegramAPIError):
+                    await self.bot.unpin_chat_message(user_id, message_id=message_id)
+                with suppress(TelegramAPIError):
+                    await self.bot.delete_message(user_id, message_id)
+            raise
+
+        for user_id, (previous_id, message_id) in prepared.items():
+            if user_id not in applied:
+                failed += 1
+                with suppress(TelegramAPIError):
+                    await self.bot.unpin_chat_message(user_id, message_id=message_id)
+                with suppress(TelegramAPIError):
+                    await self.bot.delete_message(user_id, message_id)
+                continue
+            if previous_id is not None and previous_id != message_id:
+                with suppress(TelegramAPIError):
+                    await self.bot.unpin_chat_message(user_id, message_id=previous_id)
+                with suppress(TelegramAPIError):
+                    await self.bot.delete_message(user_id, previous_id)
+        return len(applied), failed
+
     async def render_workspace(
         self,
         *,

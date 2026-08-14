@@ -232,7 +232,15 @@ def delivery_caption(file: FileRecord, kind: ContentKind, category_name: str) ->
     if file.record_kind == RecordKind.EPISODE:
         lines.append(f"▶️ <b>Episode</b>  •  Season {file.season}, Episode {file.episode}")
     elif file.record_kind == RecordKind.SEASON_PACK_PART:
-        lines.append(f"📦 <b>Season pack</b>  •  Season {file.season}, Part {file.pack_part or 1}")
+        if file.episode_start is not None and file.episode_end is not None:
+            lines.append(
+                f"📦 <b>Episode pack</b>  •  Season {file.season}, "
+                f"Episodes {file.episode_start}–{file.episode_end}"
+            )
+        else:
+            lines.append(
+                f"📦 <b>Season pack</b>  •  Season {file.season}, Part {file.pack_part or 1}"
+            )
     lines.extend(
         [
             f"📅 <b>Year</b>  •  {file.year or 'Unknown'}",
@@ -240,7 +248,7 @@ def delivery_caption(file: FileRecord, kind: ContentKind, category_name: str) ->
             + safe_html(", ".join(file.languages) if file.languages else "Unknown"),
             "💎 <b>Quality</b>  •  " + safe_html(file.quality or "Unknown"),
             "━━━━━━━━━━━━━━━━━━",
-            "🔐 Protected delivery • kept in your category archive.",
+            "🔐 Protected delivery • kept permanently in your private chat.",
         ]
     )
     return "\n".join(lines)

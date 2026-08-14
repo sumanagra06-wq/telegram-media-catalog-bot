@@ -13,6 +13,8 @@ class ParsedMetadata(BaseModel):
     quality: str | None = None
     season: int | None = None
     episode: int | None = None
+    episode_start: int | None = None
+    episode_end: int | None = None
     pack_part: int | None = None
 
 
@@ -38,7 +40,7 @@ _LANGUAGES = (
     _Language("Punjabi", ("punjabi", "panjabi", "pun")),
     _Language("Gujarati", ("gujarati", "guj")),
     _Language("Urdu", ("urdu", "urd")),
-    _Language("Japanese", ("japanese", "jpn")),
+    _Language("Japanese", ("japanese", "jpn", "jap")),
     _Language("Korean", ("korean", "kor")),
     _Language("Spanish", ("spanish", "spa")),
     _Language("French", ("french", "fre", "fra")),
@@ -56,6 +58,10 @@ _SEASON_EPISODE_RE = re.compile(
 )
 _SEASON_RE = re.compile(r"(?i)\bS(?:eason)?\s*0*(?P<season>\d{1,3})\b")
 _EPISODE_RE = re.compile(r"(?i)\bE(?:p(?:isode)?)?\s*0*(?P<episode>\d{1,4})\b")
+_EPISODE_RANGE_RE = re.compile(
+    r"(?i)\bE(?:p(?:isode)?)?\s*0*(?P<start>\d{1,4})\s*"
+    r"(?:to|[-–—])\s*0*(?P<end>\d{1,4})\b"
+)
 _YEAR_RE = re.compile(r"(?<!\d)(?P<year>19\d{2}|20\d{2})(?!\d)")
 _QUALITY_RE = re.compile(r"(?i)(?<!\w)(2160p|1080p|720p|480p|360p|4k|uhd|fhd)(?!\w)")
 _PACK_PART_RE = re.compile(
@@ -75,6 +81,9 @@ _TECHNICAL_BOUNDARY_RE = re.compile(
     r"(?i)\b(?:web[ ._-]*dl|webrip|blu[ ._-]*ray|brrip|dvdrip|hdrip|"
     r"x26[45]|hevc|avc|10[ ._-]*bit|esubs?|aac|ddp?|atmos)\b"
 )
+_MOVIE_NUMBER_TITLE_RE = re.compile(r"(?im)^\s*[^\w]*movie\s+no\.?\s*\d+\s*:\s*(?P<title>.+?)\s*$")
+_BOILERPLATE_LINE_RE = re.compile(r"(?i)^[^\w@]*(?:movies\s*[.]?\s*in\s*:|uploaded\s+by\s*:.*)$")
+_MEDIA_EXTENSION_RE = re.compile(r"(?i)\.(?:mkv|mp4|avi|mov|zip|rar|7z)(?:\.\d{3})?\s*$")
 
 
 def _labeled_value(text: str, names: tuple[str, ...]) -> str | None:
@@ -89,11 +98,43 @@ def _metadata_lines(caption: str | None, filename: str | None) -> list[str]:
     if caption:
         for raw in caption.splitlines():
             line = raw.strip()
-            if line and not _WARNING_RE.search(line):
+            if line and not _WARNING_RE.search(line) and not _BOILERPLATE_LINE_RE.fullmatch(line):
                 lines.append(line)
     if filename and not any(filename.strip() == line for line in lines):
         lines.append(filename.strip())
     return lines
+
+
+def _caption_has_multiple_media_entries(caption: str | None) -> bool:
+    if not caption:
+        return False
+    candidates = 0
+    for raw in caption.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if (
+            _MEDIA_EXTENSION_RE.search(line)
+            or _SEASON_EPISODE_RE.search(line)
+            or _EPISODE_RANGE_RE.search(line)
+            or _MOVIE_NUMBER_TITLE_RE.fullmatch(line)
+        ):
+            candidates += 1
+    return candidates > 1
+
+
+def _descriptive_filename(filename: str | None) -> bool:
+    if not filename:
+        return False
+    working = _normalize_working_line(filename)
+    return bool(
+        _SEASON_EPISODE_RE.search(working)
+        or _EPISODE_RANGE_RE.search(working)
+        or _SEASON_RE.search(working)
+        or _YEAR_RE.search(working)
+        or _QUALITY_RE.search(working)
+        or _TECHNICAL_BOUNDARY_RE.search(working)
+    )
 
 
 def _primary_line(lines: list[str]) -> str:
@@ -146,7 +187,7 @@ def _clean_title(value: str) -> str:
     value = re.sub(r"^[^\w@]+", "", value, flags=re.UNICODE)
     value = value.replace("_", " ").replace(".", " ")
     value = re.sub(r"\s+", " ", value)
-    value = re.sub(r"[\s|:\-–—]+$", "", value)
+    value = re.sub(r"[\s|:\-–—(\[]+$", "", value)
     return value.strip()
 
 
@@ -208,12 +249,23 @@ def parse_metadata(caption: str | None, filename: str | None = None) -> ParsedMe
     if not lines:
         raise MetadataParseError("No caption or filename was provided")
     combined = "\n".join(lines)
-    primary = _primary_line(lines)
-    scan_text = _normalize_working_line(" ".join(lines))
+    filename_is_authoritative = bool(
+        _caption_has_multiple_media_entries(caption) and _descriptive_filename(filename)
+    )
+    metadata_text = filename.strip() if filename_is_authoritative and filename else combined
+    primary = filename.strip() if filename_is_authoritative and filename else _primary_line(lines)
+    scan_text = _normalize_working_line(metadata_text.replace("\n", " "))
 
-    explicit_title = _labeled_value(combined, _LABELS["title"])
+    movie_number_title = _MOVIE_NUMBER_TITLE_RE.search(combined)
+    explicit_title = (
+        None if filename_is_authoritative else _labeled_value(combined, _LABELS["title"])
+    )
     if explicit_title:
         title = canonicalize_title(explicit_title)
+    elif movie_number_title and not filename_is_authoritative:
+        title = canonicalize_title(movie_number_title.group("title"))
+    elif filename_is_authoritative:
+        title = _title_from_primary(primary)
     else:
         first_working = _normalize_working_line(lines[0])
         first_has_metadata = any(
@@ -236,14 +288,26 @@ def parse_metadata(caption: str | None, filename: str | None = None) -> ParsedMe
         raise MetadataParseError("Could not determine the title")
 
     season_episode = _SEASON_EPISODE_RE.search(scan_text)
-    season_label = _extract_int(_labeled_value(combined, _LABELS["season"]))
-    episode_label = _extract_int(_labeled_value(combined, _LABELS["episode"]))
+    episode_range = _EPISODE_RANGE_RE.search(scan_text)
+    labels_text = metadata_text if filename_is_authoritative else combined
+    season_label = _extract_int(_labeled_value(labels_text, _LABELS["season"]))
+    episode_label = _extract_int(_labeled_value(labels_text, _LABELS["episode"]))
     season_match = _SEASON_RE.search(scan_text)
     episode_match = _EPISODE_RE.search(scan_text)
 
     season = season_label
     episode = episode_label
-    if season_episode:
+    episode_start = None
+    episode_end = None
+    if episode_range:
+        episode_start = int(episode_range.group("start"))
+        episode_end = int(episode_range.group("end"))
+        if episode_end < episode_start:
+            raise MetadataParseError("Combined episode range ends before it starts")
+        if season is None and season_match:
+            season = int(season_match.group("season"))
+        episode = None
+    elif season_episode:
         season = season or int(season_episode.group("season"))
         episode = episode or int(season_episode.group("episode"))
     else:
@@ -252,25 +316,27 @@ def parse_metadata(caption: str | None, filename: str | None = None) -> ParsedMe
         if episode is None and episode_match:
             episode = int(episode_match.group("episode"))
 
-    year_value = _labeled_value(combined, _LABELS["year"])
+    year_value = _labeled_value(labels_text, _LABELS["year"])
     year = _extract_int(year_value)
     if year is None:
         year_match = _YEAR_RE.search(scan_text)
         year = int(year_match.group("year")) if year_match else None
 
-    language_value = _labeled_value(combined, _LABELS["language"])
+    language_value = _labeled_value(labels_text, _LABELS["language"])
     languages = _extract_languages(language_value or scan_text)
-    quality_value = _labeled_value(combined, _LABELS["quality"])
+    quality_value = _labeled_value(labels_text, _LABELS["quality"])
     quality = _extract_quality(quality_value or scan_text)
 
-    pack_match = _PACK_PART_RE.search(combined)
+    pack_match = _PACK_PART_RE.search(metadata_text)
     pack_part = None
     if pack_match:
         pack_part = int(pack_match.group("part") or pack_match.group("part2"))
+    elif episode_start is not None:
+        pack_part = episode_start
 
     # Defense in depth for any caption shape that extracted episode metadata but reached
     # the title through a different branch. Repository writes enforce this invariant too.
-    if season is not None or episode is not None:
+    if season is not None or episode is not None or episode_start is not None:
         title = canonicalize_title(title)
     if not title:
         raise MetadataParseError("Could not determine the canonical title")
@@ -282,5 +348,7 @@ def parse_metadata(caption: str | None, filename: str | None = None) -> ParsedMe
         quality=quality,
         season=season,
         episode=episode,
+        episode_start=episode_start,
+        episode_end=episode_end,
         pack_part=pack_part,
     )

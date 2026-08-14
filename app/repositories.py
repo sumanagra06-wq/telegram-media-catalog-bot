@@ -85,12 +85,12 @@ class CatalogRepository:
         return self.store.snapshot()
 
     async def migrate_schema(self) -> bool:
-        if self.store.state.schema_version >= 2:
+        if self.store.state.schema_version >= 3:
             return False
 
         def mutate(state: CatalogState) -> bool:
-            state.schema_version = 2
-            _append_audit(state, "catalog.schema", "Migrated catalog schema to version 2")
+            state.schema_version = 3
+            _append_audit(state, "catalog.schema", "Migrated catalog schema to version 3")
             return True
 
         return await self.store.mutate(mutate)
@@ -473,7 +473,11 @@ class CatalogRepository:
     ) -> tuple[FileRecord, ContentRecord, bool]:
         # Enforce one stable series identity at the persistence boundary even if a future
         # caption-parser branch accidentally leaves SxxExx or technical suffixes in the title.
-        if metadata.season is not None or metadata.episode is not None:
+        if (
+            metadata.season is not None
+            or metadata.episode is not None
+            or metadata.episode_start is not None
+        ):
             canonical_title = canonicalize_title(metadata.title)
             if canonical_title and canonical_title != metadata.title:
                 metadata = metadata.model_copy(update={"title": canonical_title})
@@ -558,6 +562,8 @@ class CatalogRepository:
                 quality=metadata.quality,
                 season=metadata.season,
                 episode=metadata.episode,
+                episode_start=metadata.episode_start,
+                episode_end=metadata.episode_end,
                 pack_part=metadata.pack_part
                 or (1 if record_kind == RecordKind.SEASON_PACK_PART else None),
                 available=True,
@@ -899,6 +905,28 @@ class UserRepository:
             user.panel_dashboard_message_id = message_id
             user.updated_at = utcnow_iso()
             return user.model_copy(deep=True)
+
+        return await self.store.mutate(mutate)
+
+    async def replace_panel_dashboard_messages(
+        self,
+        replacements: dict[int, tuple[int | None, int]],
+    ) -> set[int]:
+        """Atomically compare-and-set dashboard IDs prepared by a bulk operation."""
+        if not replacements:
+            return set()
+
+        def mutate(state: UsersState) -> set[int]:
+            applied: set[int] = set()
+            now = utcnow_iso()
+            for user_id, (expected_message_id, new_message_id) in replacements.items():
+                user = state.users.get(str(user_id))
+                if user is None or user.panel_dashboard_message_id != expected_message_id:
+                    continue
+                user.panel_dashboard_message_id = new_message_id
+                user.updated_at = now
+                applied.add(user_id)
+            return applied
 
         return await self.store.mutate(mutate)
 

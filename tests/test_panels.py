@@ -316,6 +316,84 @@ async def test_emergency_dashboard_repost_rolls_back_when_snapshot_commit_fails(
     assert (42, 77) not in bot.deleted
 
 
+async def test_bulk_dashboard_repost_uses_one_atomic_snapshot_commit():
+    _, users = await _repositories()
+    await _register(users, 42)
+    await _register(users, 43)
+    await users.set_panel_dashboard_message(42, 50)
+    await users.set_panel_dashboard_message(43, 60)
+    bot = FakePanelBot()
+    panels = PanelManager(bot, users)
+    text_42, markup_42 = panel_dashboard(False, "Alice")
+    text_43, markup_43 = panel_dashboard(False, "Bob")
+    revision = users.snapshot().revision
+
+    refreshed, failed = await panels.repost_dashboards(
+        [(42, text_42, markup_42), (43, text_43, markup_43)]
+    )
+
+    assert (refreshed, failed) == (2, 0)
+    assert users.snapshot().revision == revision + 1
+    assert users.get_user(42).panel_dashboard_message_id == 100
+    assert users.get_user(43).panel_dashboard_message_id == 101
+    assert bot.pinned == [
+        (42, 100, {"disable_notification": True}),
+        (43, 101, {"disable_notification": True}),
+    ]
+    assert bot.unpinned == [(42, 50), (43, 60)]
+    assert bot.deleted == [(42, 50), (43, 60)]
+
+
+async def test_bulk_dashboard_repost_rolls_back_only_a_compare_and_set_conflict(monkeypatch):
+    _, users = await _repositories()
+    await _register(users, 42)
+    await _register(users, 43)
+    await users.set_panel_dashboard_message(42, 50)
+    await users.set_panel_dashboard_message(43, 60)
+    bot = FakePanelBot()
+    panels = PanelManager(bot, users)
+    text, markup = panel_dashboard(False, "Alice")
+    changed = False
+
+    async def concurrent_dashboard_change(_delay):
+        nonlocal changed
+        if not changed:
+            changed = True
+            await users.set_panel_dashboard_message(42, 70)
+
+    monkeypatch.setattr("app.panels.asyncio.sleep", concurrent_dashboard_change)
+    refreshed, failed = await panels.repost_dashboards([(42, text, markup), (43, text, markup)])
+
+    assert (refreshed, failed) == (1, 1)
+    assert users.get_user(42).panel_dashboard_message_id == 70
+    assert users.get_user(43).panel_dashboard_message_id == 101
+    assert bot.unpinned == [(42, 100), (43, 60)]
+    assert bot.deleted == [(42, 100), (43, 60)]
+    assert (42, 50) not in bot.deleted
+
+
+async def test_bulk_dashboard_repost_rolls_back_every_new_card_on_commit_failure():
+    _, users = await _repositories()
+    await _register(users, 42)
+    await _register(users, 43)
+    await users.set_panel_dashboard_message(42, 50)
+    await users.set_panel_dashboard_message(43, 60)
+    backend = users.store.backend
+    assert isinstance(backend, MemorySnapshotBackend)
+    backend.fail_next_commit = True
+    bot = FakePanelBot()
+    panels = PanelManager(bot, users)
+    text, markup = panel_dashboard(False, "Alice")
+
+    with pytest.raises(StorageError):
+        await panels.repost_dashboards([(42, text, markup), (43, text, markup)])
+
+    assert users.get_user(42).panel_dashboard_message_id == 50
+    assert users.get_user(43).panel_dashboard_message_id == 60
+    assert bot.unpinned == [(42, 100), (43, 101)]
+    assert bot.deleted == [(42, 100), (43, 101)]
+
+
 async def test_flat_chat_migration_deletes_all_recorded_topics_and_clears_references():
     _, users = await _repositories()
     await _register(users)

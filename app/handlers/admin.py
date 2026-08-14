@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import Counter, defaultdict
+from contextlib import suppress
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -24,12 +31,14 @@ from ..models import AccessMode, CategoryMode, RemovedSourceRecord, UserStatus
 from ..panels import PanelManager
 from ..presentation import ActionButton as InlineKeyboardButton
 from ..repositories import CatalogRepository, UserRepository
+from ..storage import StorageError
 from ..ui import (
     access_mode_panel,
     admin_categories,
     admin_category_detail,
     admin_dashboard,
     page_slice,
+    panel_dashboard,
     user_detail,
     users_panel,
 )
@@ -44,6 +53,7 @@ router.callback_query.filter(F.message.chat.type == "private")
 owner = OwnerFilter()
 not_owner = NotOwnerFilter()
 DIVIDER = "━━━━━━━━━━━━━━━━━━"
+_BROADCASTS_IN_PROGRESS: set[int] = set()
 
 
 def _default_category_mode(name: str) -> CategoryMode:
@@ -63,6 +73,8 @@ class AdminState(StatesGroup):
     category_change_channel = State()
     user_find = State()
     user_community_name = State()
+    broadcast_input = State()
+    broadcast_confirm = State()
 
 
 async def _workspace_or_answer(
@@ -163,6 +175,276 @@ async def admin_home(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     text, markup = admin_dashboard()
     await edit_screen(callback, text, markup)
+
+
+def _broadcast_kind(message: Message) -> str | None:
+    if message.text:
+        return "Text message"
+    if message.photo:
+        return "Photo"
+    if message.video:
+        return "Video"
+    if message.document:
+        return "Document"
+    return None
+
+
+def _broadcast_excerpt(message: Message) -> str:
+    value = " ".join((message.text or message.caption or "").split()).strip()
+    if not value:
+        return "Media without a caption"
+    return f"{value[:157]}…" if len(value) > 160 else value
+
+
+async def _copy_broadcast_message(
+    bot: Bot,
+    *,
+    user_id: int,
+    source_chat_id: int,
+    source_message_id: int,
+) -> bool:
+    for attempt in range(3):
+        try:
+            await bot.copy_message(
+                chat_id=user_id,
+                from_chat_id=source_chat_id,
+                message_id=source_message_id,
+                reply_markup=None,
+            )
+            return True
+        except TelegramRetryAfter as exc:
+            if attempt == 2:
+                return False
+            delay = min(max(float(exc.retry_after), 0.1), 30.0)
+        except (TelegramNetworkError, TelegramServerError):
+            if attempt == 2:
+                return False
+            delay = 0.25 * (2**attempt)
+        except TelegramAPIError:
+            return False
+        await asyncio.sleep(delay)
+    return False
+
+
+async def _cleanup_broadcast_draft(bot: Bot, chat_id: int | None, message_id: int | None) -> None:
+    if chat_id is None or message_id is None:
+        return
+    with suppress(TelegramAPIError):
+        await bot.delete_message(chat_id, message_id)
+
+
+@router.callback_query(F.data == "ab:start", owner)
+async def broadcast_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    users: UserRepository,
+) -> None:
+    await state.clear()
+    await state.set_state(AdminState.broadcast_input)
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data="ab:cancel"))
+    await callback.answer()
+    await edit_screen(
+        callback,
+        "📣 <b>NEW BROADCAST</b>\n"
+        "<blockquote>Owner-only announcement composer</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"👥 Registered recipients: <b>{len(users.list_users())}</b>\n\n"
+        "Send or forward one text, photo, video, or document. You can also reply to an "
+        "existing message with any short trigger text; the replied-to message will be copied.\n\n"
+        "Nothing is sent until the confirmation screen.",
+        builder.as_markup(),
+    )
+
+
+@router.message(AdminState.broadcast_input, owner, ~F.text.startswith("/"))
+async def broadcast_input(
+    message: Message,
+    state: FSMContext,
+    users: UserRepository,
+    panels: PanelManager | None = None,
+) -> None:
+    replied = message.reply_to_message
+    source = replied if replied is not None and _broadcast_kind(replied) else message
+    kind = _broadcast_kind(source)
+    if kind is None:
+        await message.answer("Send or reply to one text, photo, video, or document.")
+        return
+    await state.set_state(AdminState.broadcast_confirm)
+    await state.update_data(
+        broadcast_source_chat_id=source.chat.id,
+        broadcast_source_message_id=source.message_id,
+        broadcast_cleanup_chat_id=message.chat.id,
+        broadcast_cleanup_message_id=message.message_id,
+    )
+    recipients = len(users.list_users())
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text=f"📣 Send to {recipients} users",
+            callback_data="ab:send",
+            style="success",
+        )
+    )
+    builder.row(InlineKeyboardButton(text="✖️ Cancel", callback_data="ab:cancel"))
+    await _workspace_or_answer(
+        message,
+        "📣 <b>CONFIRM BROADCAST</b>\n"
+        "<blockquote>One announcement • every registered account</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"🧾 <b>Type</b>  •  {kind}\n"
+        f"👥 <b>Recipients</b>  •  {recipients}\n"
+        f"👁 <b>Preview</b>  •  {safe_html(_broadcast_excerpt(source))}\n"
+        f"{DIVIDER}\n"
+        "The message will be copied without action buttons. After each successful copy, "
+        "one fresh pinned dashboard will replace that user's previous dashboard.",
+        panels,
+        builder.as_markup(),
+    )
+
+
+@router.callback_query(F.data == "ab:cancel", owner)
+async def broadcast_cancel(
+    callback: CallbackQuery,
+    bot: Bot,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+    await state.clear()
+    await _cleanup_broadcast_draft(
+        bot,
+        data.get("broadcast_cleanup_chat_id"),
+        data.get("broadcast_cleanup_message_id"),
+    )
+    await callback.answer("Broadcast cancelled.")
+    text, markup = admin_dashboard()
+    await edit_screen(callback, text, markup)
+
+
+@router.callback_query(
+    F.data == "ab:send",
+    owner,
+    StateFilter(AdminState.broadcast_confirm),
+)
+async def broadcast_send(
+    callback: CallbackQuery,
+    bot: Bot,
+    state: FSMContext,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    config: Config,
+    panels: PanelManager | None = None,
+) -> None:
+    owner_id = callback.from_user.id
+    if owner_id in _BROADCASTS_IN_PROGRESS:
+        await callback.answer("A broadcast is already in progress.", show_alert=True)
+        return
+    _BROADCASTS_IN_PROGRESS.add(owner_id)
+    try:
+        await _execute_broadcast_send(callback, bot, state, users, catalog, config, panels)
+    finally:
+        _BROADCASTS_IN_PROGRESS.discard(owner_id)
+
+
+async def _execute_broadcast_send(
+    callback: CallbackQuery,
+    bot: Bot,
+    state: FSMContext,
+    users: UserRepository,
+    catalog: CatalogRepository,
+    config: Config,
+    panels: PanelManager | None,
+) -> None:
+    data = await state.get_data()
+    source_chat_id = data.get("broadcast_source_chat_id")
+    source_message_id = data.get("broadcast_source_message_id")
+    cleanup_chat_id = data.get("broadcast_cleanup_chat_id")
+    cleanup_message_id = data.get("broadcast_cleanup_message_id")
+    if not isinstance(source_chat_id, int) or not isinstance(source_message_id, int):
+        await state.clear()
+        await callback.answer("This broadcast preview expired.", show_alert=True)
+        return
+
+    recipients = sorted(users.list_users(), key=lambda item: item.telegram_user_id)
+    await state.clear()
+    await callback.answer("Broadcast started…")
+    await edit_screen(
+        callback,
+        "📡 <b>BROADCAST IN PROGRESS</b>\n"
+        f"<blockquote>Sending to {len(recipients)} registered users</blockquote>\n"
+        f"{DIVIDER}\n"
+        "Please keep this workspace open until the final delivery report appears.",
+        None,
+    )
+
+    delivered = []
+    failed = 0
+    for index, profile in enumerate(recipients):
+        copied = await _copy_broadcast_message(
+            bot,
+            user_id=profile.telegram_user_id,
+            source_chat_id=source_chat_id,
+            source_message_id=source_message_id,
+        )
+        if copied:
+            delivered.append(profile)
+        else:
+            failed += 1
+            LOGGER.info("Broadcast copy failed for user %s", profile.telegram_user_id)
+        if index + 1 < len(recipients):
+            await asyncio.sleep(0.05)
+
+    dashboards_refreshed = 0
+    dashboard_failures = 0
+    if panels is not None and delivered:
+        dashboard_requests = []
+        for profile in delivered:
+            text, markup = panel_dashboard(
+                config.is_owner(profile.telegram_user_id),
+                profile.first_name,
+            )
+            dashboard_requests.append((profile.telegram_user_id, text, markup))
+        try:
+            dashboards_refreshed, dashboard_failures = await panels.repost_dashboards(
+                dashboard_requests
+            )
+        except StorageError:
+            dashboard_failures = len(delivered)
+            LOGGER.warning(
+                "Broadcast delivered but dashboard batch persistence failed", exc_info=True
+            )
+
+    await _cleanup_broadcast_draft(bot, cleanup_chat_id, cleanup_message_id)
+    audit_failed = False
+    try:
+        await catalog.add_audit(
+            "broadcast.send",
+            f"Broadcast complete: recipients={len(recipients)} sent={len(delivered)} "
+            f"failed={failed} dashboards={dashboards_refreshed} "
+            f"dashboard_failed={dashboard_failures}",
+            callback.from_user.id,
+        )
+    except StorageError:
+        audit_failed = True
+        LOGGER.exception("Broadcast completed but its catalog audit could not be persisted")
+    icon = "✅" if failed == 0 and dashboard_failures == 0 and not audit_failed else "⚠️"
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="📣 Send another", callback_data="ab:start"))
+    builder.row(InlineKeyboardButton(text="◀️ Admin panel", callback_data="admin:home"))
+    await edit_screen(
+        callback,
+        f"{icon} <b>BROADCAST COMPLETE</b>\n"
+        "<blockquote>Owner announcement delivery report</blockquote>\n"
+        f"{DIVIDER}\n"
+        f"✅ <b>Messages delivered</b>  •  {len(delivered)}\n"
+        f"❌ <b>Message failures</b>  •  {failed}\n"
+        f"📌 <b>Dashboards refreshed</b>  •  {dashboards_refreshed}\n"
+        f"⚠️ <b>Dashboard failures</b>  •  {dashboard_failures}\n"
+        f"🧾 <b>Audit saved</b>  •  {'No' if audit_failed else 'Yes'}\n"
+        f"{DIVIDER}\n"
+        "Failures usually mean the user blocked the bot or Telegram rejected the destination.",
+        builder.as_markup(),
+    )
 
 
 @router.message(Command("index"), owner)
@@ -1365,6 +1647,6 @@ async def bot_settings_callback(
 
 
 @router.callback_query(F.data.startswith("admin:"), not_owner)
-@router.callback_query(F.data.startswith(("ac", "ad", "au", "access")), not_owner)
+@router.callback_query(F.data.startswith(("ab", "ac", "ad", "au", "access")), not_owner)
 async def unauthorized_admin_callback(callback: CallbackQuery) -> None:
     await callback.answer("You are not authorized.", show_alert=True)

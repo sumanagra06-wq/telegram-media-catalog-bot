@@ -124,7 +124,7 @@ async def test_plain_search_to_episode_delivery_flow():
                 "🗣 <b>Language</b>  •  Hindi\n"
                 "💎 <b>Quality</b>  •  1080p\n"
                 "━━━━━━━━━━━━━━━━━━\n"
-                "🔐 Protected delivery • kept in your category archive."
+                "🔐 Protected delivery • kept permanently in your private chat."
             ),
             "parse_mode": "HTML",
             "protect_content": True,

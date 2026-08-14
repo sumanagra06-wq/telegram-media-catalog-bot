@@ -375,9 +375,14 @@ def season_screen(
 
     pack_parts = query.season_pack_parts(content.id, season)
     if pack_parts:
+        has_episode_ranges = any(item.episode_start is not None for item in pack_parts)
         builder.row(
             InlineKeyboardButton(
-                text="📦 Download complete season pack",
+                text=(
+                    "📦 Download combined episode packs"
+                    if has_episode_ranges
+                    else "📦 Download complete season pack"
+                ),
                 callback_data=f"pk:{content.id}:{season}:{token}:{result_page}",
                 style="success",
             )
@@ -414,11 +419,16 @@ def season_screen(
         "Tap an episode to receive it:"
     )
     if not episodes and pack_parts:
+        has_episode_ranges = any(item.episode_start is not None for item in pack_parts)
         text = (
             f"📺 <b>{safe_html(content.title)}</b>\n"
             f"<blockquote>Season {season}</blockquote>\n"
             f"{DIVIDER}\n"
-            "📦 Individual episodes are unavailable, but the complete season pack is ready."
+            + (
+                "📦 Combined episode-range packs are ready for delivery."
+                if has_episode_ranges
+                else "📦 Individual episodes are unavailable, but the complete season pack is ready."
+            )
         )
     elif not episodes:
         text = (
@@ -473,8 +483,12 @@ def pack_screen(
     result_page: int,
 ) -> tuple[str, InlineKeyboardMarkup]:
     builder = InlineKeyboardBuilder()
+    has_episode_ranges = any(item.episode_start is not None for item in parts)
     for item in parts:
-        label = f"📦 Part {item.pack_part or 1} • {variant_label(item)}"
+        if item.episode_start is not None and item.episode_end is not None:
+            label = f"📦 Episodes {item.episode_start}–{item.episode_end} • {variant_label(item)}"
+        else:
+            label = f"📦 Part {item.pack_part or 1} • {variant_label(item)}"
         builder.row(
             InlineKeyboardButton(
                 text=compact_label(label, 58),
@@ -491,10 +505,15 @@ def pack_screen(
     return (
         (
             f"📦 <b>{safe_html(content.title)}</b>\n"
-            f"<blockquote>Season {season} • complete pack</blockquote>\n"
+            f"<blockquote>Season {season} • "
+            f"{'combined episode packs' if has_episode_ranges else 'complete pack'}</blockquote>\n"
             f"{DIVIDER}\n"
-            f"🧩 Archive parts: <b>{len(parts)}</b>\n\n"
-            "Download every part before extracting the archive:"
+            f"🧩 {'Pack files' if has_episode_ranges else 'Archive parts'}: <b>{len(parts)}</b>\n\n"
+            + (
+                "Choose an episode range to receive its combined file:"
+                if has_episode_ranges
+                else "Download every part before extracting the archive:"
+            )
         ),
         builder.as_markup(),
     )
@@ -1117,7 +1136,10 @@ def admin_dashboard() -> tuple[str, InlineKeyboardMarkup]:
         InlineKeyboardButton(text="🔐 Access", callback_data="admin:access", style="primary"),
         InlineKeyboardButton(text="⚙️ Settings", callback_data="admin:settings"),
     )
-    builder.row(InlineKeyboardButton(text="📜 Audit trail", callback_data="admin:audit"))
+    builder.row(
+        InlineKeyboardButton(text="📣 Broadcast", callback_data="ab:start", style="primary"),
+        InlineKeyboardButton(text="📜 Audit trail", callback_data="admin:audit"),
+    )
     builder.row(InlineKeyboardButton(text="🏠 User menu", callback_data="menu:home"))
     return (
         (

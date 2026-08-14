@@ -15,6 +15,7 @@ from app.models import (
 from app.repositories import CatalogRepository, UserRepository
 from app.services import CatalogQueryService
 from app.storage import MemorySnapshotBackend, StateStore, StorageError
+from app.ui import pack_screen, season_screen
 from app.utils import normalize_title
 
 
@@ -32,6 +33,20 @@ async def user_pair():
     store = StateStore(backend, UsersState, UsersState)
     await store.initialize()
     return UserRepository(store), backend
+
+
+async def test_catalog_schema_v2_snapshot_migrates_to_v3():
+    legacy = CatalogState(schema_version=2, revision=7).model_dump(mode="json")
+    backend = MemorySnapshotBackend("catalog", initial=legacy)
+    store = StateStore(backend, CatalogState, CatalogState)
+    await store.initialize()
+    catalog = CatalogRepository(store)
+
+    assert await catalog.migrate_schema() is True
+    assert catalog.snapshot().schema_version == 3
+    assert catalog.snapshot().revision == 8
+    assert catalog.recent_audit(1)[0].details == "Migrated catalog schema to version 3"
+    assert await catalog.migrate_schema() is False
 
 
 async def _add_file(catalog, category_id, message_id, text):
@@ -168,6 +183,37 @@ async def test_pack_parts_and_search_ranking(catalog_pair):
 
     got = query.search("Game of Thrones")[0].content
     assert [item.pack_part for item in query.season_pack_parts(got.id, 1)] == [1, 2, 3]
+
+
+async def test_combined_episode_ranges_render_as_labeled_season_packs(catalog_pair):
+    catalog, _ = catalog_pair
+    category = await catalog.add_category(
+        "Series",
+        -100100,
+        None,
+        CategoryMode.EPISODIC,
+    )
+    filenames = (
+        "Doraemon.S18.Ep.1to15.Combined.Multi.Audio+Hindi.mkv",
+        "Doraemon.S18.Ep31To40.Hindi+Multi.Audio.mkv",
+    )
+    for message_id, filename in enumerate(filenames, start=1):
+        await _add_file(catalog, category.id, message_id, filename)
+
+    content = CatalogQueryService(catalog).search("Doraemon")[0].content
+    query = CatalogQueryService(catalog)
+    parts = query.season_pack_parts(content.id, 18)
+    assert [(item.episode_start, item.episode_end) for item in parts] == [(1, 15), (31, 40)]
+    assert all(item.episode is None for item in parts)
+
+    season_text, season_markup = season_screen(content, 18, query, "0", 0)
+    assert "Combined episode-range packs" in season_text
+    assert "Download combined episode packs" in str(season_markup)
+
+    pack_text, pack_markup = pack_screen(content, 18, parts, "0", 0)
+    assert "combined episode packs" in pack_text
+    assert "Episodes 1–15" in str(pack_markup)
+    assert "Episodes 31–40" in str(pack_markup)
 
 
 async def test_duplicate_channel_update_is_an_update_not_a_duplicate_record(catalog_pair):

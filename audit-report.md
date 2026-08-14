@@ -23,10 +23,13 @@ This report records checks performed before packaging. It is not a claim that li
 - Permanent file-only deliveries with premium captions and no action keyboards
 - Typed-title query cleanup, temporary discovery-card cleanup, and fresh dashboard replacement/pinning after every successful delivery
 - Unified owner dashboard with an authorization-checked Admin Control Center entry
+- Owner-only all-profile broadcast preview/confirmation, retry-aware source copying, per-recipient dashboard replacement, exact totals, cleanup, and audit
+- One-commit compare-and-set persistence for bulk dashboard references, including rollback and partial-failure behavior
 - Semantic Bot API button styles (`primary`, `success`, `danger`) with neutral secondary actions
 - Unicode-emoji labels and consistent HTML card hierarchy across user and owner screens
 - Absence of custom-emoji dependencies and preservation of existing callback contracts
-- Series episodes, variants and split season packs
+- Series episodes, variants, split season packs, and combined episode-range Season Packs
+- Additive `MOVIES.IN`/numbered-movie parsing and descriptive attachment-filename authority for mixed captions
 - Protected direct delivery, structured delivery captions and flat-chat Telegram file-ID fallback
 - BotFather Threaded Mode startup/health visibility plus explicit normal-chat disablement guidance
 - Dashboard-final native command scope, emergency dashboard repost/rollback, hidden `/start` onboarding, and owner-only reply-based `/index` recovery
@@ -72,17 +75,23 @@ This report records checks performed before packaging. It is not a claim that li
 31. Replaced post-delivery workspace/receipt reuse with a fresh-dashboard transaction: send and pin a new dashboard beneath the delivered file, persist its ID, then unpin/delete the previous dashboard. If persistence fails, the new dashboard is rolled back while the delivered file and old tracked dashboard remain intact.
 32. Added startup retirement of every persisted legacy single/category topic. Confirmed deletions and Telegram's already-unavailable responses clear only the matching references; transient/permission failures keep references for the next startup retry. This migration intentionally deletes copies inside those topics while leaving private catalog source posts untouched.
 33. Removed the legacy receipt field during v7 migration, treat all persisted workspaces as temporary during restart cleanup, expose `delivery_mode: flat_chat` plus the pending legacy-topic count, and log that the owner must disable BotFather Threaded Mode to restore Telegram's normal private-chat UI.
+34. Extended the caption parser additively for `MOVIES.IN:`, `Movie No.<n>:`, `Jap → Japanese`, and mixed multi-filename captions. When a mixed caption has a descriptive attachment name, only that filename supplies title/season/episode/range/year/language/quality, preventing unrelated caption blocks from contaminating identity while retaining existing fallback behavior for generic attachment names.
+35. Added catalog schema v3 episode-range persistence. Combined files such as `S18.Ep.1to15` and `Ep31To40` have no individual episode number, remain Season Pack records, sort by range start, and render/deliver as `Episodes X–Y`; split archives continue to render as `Part N`.
+36. Added owner-only broadcast composition in the Admin Control Center. It counts every stored profile across all statuses, accepts direct/replied text/photo/video/document sources, previews and confirms once, copies without action buttons with pacing/bounded retries, refreshes dashboards only for successful recipients, cleans the draft, records exact totals in the audit, and reports message/dashboard failures separately.
+37. Hardened broadcast dashboard persistence into one users-snapshot compare-and-set commit. Fresh cards are sent and pinned first; old cards are retired only after durable application, while storage/CAS failures unpin/delete the uncommitted replacements and preserve the tracked previous dashboards.
+
+No catalog record or Telegram source post was removed for the cancelled Doraemon/Nobita deletion request. This release contains no task-specific bulk deletion path.
 
 ## Automated results at package time
 
 - Ruff lint: passed
 - Ruff formatting check: passed
 - Python compileall: passed
-- Pytest with warnings treated as errors: passed (106 tests)
-- Test coverage: 64% overall; metadata parser 98%, snapshot storage 84%, repositories 75%, services 87%, panel handlers 54%, Watchlist handlers 60%, delivery/search handlers 58%, panel lifecycle manager 72%, UI 76%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
+- Pytest with warnings treated as errors: passed (123 tests)
+- Test coverage: 66% overall; metadata parser 97%, snapshot storage 84%, repositories 77%, services 88%, panel handlers 54%, Watchlist handlers 60%, delivery/search handlers 58%, panel lifecycle manager 70%, UI 78%, and presentation styles 96%, with credential-dependent Telegram/Railway branches necessarily unexecuted
 - Bandit: passed; the required Railway `0.0.0.0` bind is explicitly documented/suppressed
 - pip-audit: passed, no known vulnerabilities in production requirements
-- Mypy: core configuration, models, parser, storage, repositories, services, panel lifecycle, UI, presentation and command modules passed; changed panel/search handlers and application startup also passed focused checks with imported handler modules skipped because Aiogram runtime narrowing is not represented statically
+- Mypy: core configuration, models, parser, storage, repositories, services, panel lifecycle, UI, presentation and command modules passed; changed admin/channel handlers and application startup also passed focused checks with imported modules skipped because Aiogram runtime narrowing is not represented statically
 - Command/callback audit: only hidden `/start`, visible `/dashboard`, and hidden owner `/index` command handlers remain; new callbacks are bounded to Telegram's 64-byte limit, legacy privacy callbacks remain safe, and historical discovery bulk callbacks are mutation-free expiry handlers
 - Representative rendering audit: custom batches at the 25-title/160-character boundary and the expanded picker passed Telegram text/button length, callback-size, HTML escaping, style-value and no-custom-emoji checks
 - Placeholder scan: no TODO/FIXME/XXX/HACK/NotImplemented markers
@@ -97,7 +106,11 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Game of Thrones spaced episode syntax
 - Game of Thrones `.zip.001/.002/.003` season packs
 - Labeled and filename-style movie metadata
+- `MOVIES.IN:` headers, numbered-movie labels, FHD and `Eng`/`Jap` aliases
+- Mixed multi-filename captions using the attached descriptive filename without metadata contamination
+- Ordinary `S01E25`/`S01E38`/`S02E23` episodes and combined `Ep1to15`/`Ep31To40` ranges
 - Multiline unlabeled title parsing
+- Catalog schema-v2 → v3 migration and idempotence
 - Category creation and series grouping
 - Duplicate channel-update idempotency
 - Single-file metadata correction preserving content ID
@@ -106,7 +119,7 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Failed state commit rollback
 - Snapshot restart restore and corrupt-current fallback
 - Search ranking
-- Episode/pack navigation structures
+- Episode/pack navigation structures, range-first sorting, `Episodes X–Y` UI, and range-aware delivery captions
 - Telegram callback-data size limits
 - Official button-style serialization and semantic blue/green/red/default assignment
 - Neutral cancel/back/suspend/disable controls and destructive red confirmations
@@ -139,6 +152,8 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 - Watchlist-library bulk status selection and one-commit insertion/update behavior
 - Failed Watchlist bulk snapshot commit rolling back every selected title atomically
 - Non-owner rejection at the Admin Control Center handler even when a valid dashboard message is supplied
+- Owner broadcast reply-source selection, every-status recipient inclusion, flood-wait retry, copy/dashboard partial-failure totals, source cleanup, and audit
+- Broadcast dashboard preparation using one users revision, retiring old cards only after commit, and rolling back all fresh cards on storage failure
 - Legacy dashboard callback contracts continuing alongside the new panel routes, except the intentionally removed privacy button; its callback handler remains safe for old cards
 - Watchlist-library pagination, alphabetical ordering, A–Z/# picker contents and direct filtering
 - In-category search, unsaved-only filtering, Select Page, Clear Selection and selected-only review
@@ -155,7 +170,8 @@ The Aiogram handler layer is linted, compiled and exercised through domain/UI te
 ## Honest remaining limits
 
 - The schema-v6 category-topic migration intentionally cleared the prior single-topic ID after renaming it `🗃 Previous Deliveries`. Telegram's Bot API cannot enumerate an unreferenced private-chat topic, so startup can safely delete every persisted topic but cannot rediscover that archived one. The owner must delete it manually if it remains visible before disabling Threaded Mode.
-- Automated tests use fakes and do not exercise destructive topic deletion or final flat delivery against a real Telegram private chat. Production startup logs can confirm retirement attempts and `/health` can confirm flat mode; a user-requested file remains the definitive Telegram-client smoke test. No credentials are copied into source or chat.
+- Automated tests use fakes and do not exercise destructive topic deletion, final flat delivery, or a complete broadcast against real Telegram private chats. Production startup logs can confirm retirement attempts and `/health` can confirm flat mode; one user-requested file and one controlled owner broadcast remain the definitive Telegram-client smoke tests. No credentials are copied into source or chat.
+- Broadcast fan-out is intentionally in-process and confirmation-driven rather than a durable job queue. A Railway/process interruption during fan-out can leave a partial announcement without a final report; an interruption during the short prepare-before-commit dashboard window can also leave an untracked fresh Telegram card requiring manual cleanup. The absence of a final audit/report indicates interruption, and the owner must deliberately retry only if appropriate. This tradeoff matches the stated one-owner, roughly 40–50-user deployment and one-replica architecture.
 - Application code cannot disable BotFather Threaded Mode. After legacy topics are retired, the owner must disable it manually to restore Telegram's normal private-chat UI. Flat delivery itself does not depend on that setting.
 - Telegram-only persistence is appropriate for the stated 40–50-user scale, not high-write public scale.
 - The five-minute timers are intentionally in-process. Workspace IDs are persisted; restart cleanup deletes or disables every interrupted temporary workspace. Delivered file IDs are never tracked for automatic deletion.

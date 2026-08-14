@@ -70,6 +70,8 @@ async def _write_repair_cards(
             details.append(f"Season: {record.season}")
         if record.episode is not None:
             details.append(f"Episode: {record.episode}")
+        if record.episode_start is not None and record.episode_end is not None:
+            details.append(f"Combined episodes: {record.episode_start}–{record.episode_end}")
         if record.pack_part is not None:
             details.append(f"Season pack part: {record.pack_part}")
         details.append(f"Source message: <code>{record.source_message_id}</code>")
